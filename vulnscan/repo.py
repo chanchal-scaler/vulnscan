@@ -7,7 +7,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import GITHUB_ORG, WORK_DIR, log
+from .config import GITHUB_ORGS, WORK_DIR, log
 
 _GITHUB_RE = re.compile(
     r"^(?:https://github\.com/|git@github\.com:)?(?P<owner>[\w.-]+)/(?P<name>[\w.-]+?)(?:\.git)?/?$"
@@ -29,7 +29,9 @@ def _clone(owner, name, dest, ref):
         cmd += ["--branch", ref]
     cmd += [f"https://github.com/{owner}/{name}.git", str(dest)]
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
-    token = os.environ.get("GITHUB_TOKEN")
+    # A fine-grained token only reaches one owner's repos, so a per-org token
+    # (GITHUB_TOKEN_SCALER_HQ for scaler-hq) wins over the generic one.
+    token = os.environ.get("GITHUB_TOKEN_" + re.sub(r"\W", "_", owner).upper()) or os.environ.get("GITHUB_TOKEN")
     if token:
         # Passed through the environment so it never lands in .git/config or the process list.
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -60,8 +62,8 @@ def checkout(spec, ref=None, keep=False):
     if not parsed:
         raise RepoError(f"'{spec}' is neither a local directory nor a GitHub repo (org/repo or URL)")
     owner, name = parsed
-    if GITHUB_ORG and owner.lower() != GITHUB_ORG.lower():
-        raise RepoError(f"{owner}/{name} is outside the allowed org '{GITHUB_ORG}' (VULNSCAN_GITHUB_ORG)")
+    if GITHUB_ORGS and owner.lower() not in [o.lower() for o in GITHUB_ORGS]:
+        raise RepoError(f"{owner}/{name} is outside the allowed orgs '{', '.join(GITHUB_ORGS)}' (VULNSCAN_GITHUB_ORG)")
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     dest = Path(tempfile.mkdtemp(prefix=f"{owner}__{name}__", dir=WORK_DIR))

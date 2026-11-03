@@ -119,7 +119,7 @@ def triage(findings, repo, stacks, run_dir, model=None):
     ]
     if model:
         cmd += ["--model", model]
-    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_TOKEN", "GH_TOKEN"))}
 
     try:
         proc = subprocess.run(

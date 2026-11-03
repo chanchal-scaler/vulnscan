@@ -9,8 +9,8 @@ GEM_DIR = TOOLS_DIR / "gems"
 SCANS_DIR = HOME / "scans"
 WORK_DIR = HOME / "work"
 
-# When set, only repos owned by this GitHub org can be scanned.
-GITHUB_ORG = os.environ.get("VULNSCAN_GITHUB_ORG")
+# When set (comma-separated), only repos owned by these GitHub orgs can be scanned.
+GITHUB_ORGS = [o.strip() for o in os.environ.get("VULNSCAN_GITHUB_ORG", "").split(",") if o.strip()]
 
 TOOL_TIMEOUT = int(os.environ.get("VULNSCAN_TOOL_TIMEOUT", "1800"))
 TRIAGE_TIMEOUT = int(os.environ.get("VULNSCAN_TRIAGE_TIMEOUT", "3600"))

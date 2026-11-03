@@ -9,6 +9,7 @@ param() {
   aws ssm get-parameter --region "$AWS_REGION" --name "$SSM_PREFIX/$1" \
     --with-decryption --query Parameter.Value --output text
 }
+# A classic token reaches every org its user can read, so one covers all of VULNSCAN_GITHUB_ORG.
 GITHUB_TOKEN=$(param github-token)
 CLAUDE_CODE_OAUTH_TOKEN=$(param claude-token)
 export GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN VULNSCAN_GITHUB_ORG

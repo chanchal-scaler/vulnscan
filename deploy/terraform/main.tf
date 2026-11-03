@@ -135,6 +135,18 @@ resource "aws_iam_instance_profile" "this" {
   role = aws_iam_role.this.name
 }
 
+# Created with a placeholder; replace the values by hand (deploy/README.md).
+# value_wo is write-only: neither the placeholder nor the real token is ever stored in
+# Terraform state, and Terraform doesn't overwrite a value changed outside it.
+resource "aws_ssm_parameter" "token" {
+  for_each = toset(["github-token", "claude-token"])
+
+  name             = "${var.ssm_prefix}/${each.key}"
+  type             = "SecureString"
+  value_wo         = "todo update me"
+  value_wo_version = 1
+}
+
 # ---------------------------------------------------------------------------
 # Instance and the reports volume.
 # ---------------------------------------------------------------------------

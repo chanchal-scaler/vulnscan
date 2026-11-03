@@ -48,8 +48,9 @@ vulnscan tools --install   # optional: install every scanner up front
 | Variable | Purpose |
 |---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude auth on a server. Generate it with `claude setup-token`. Not needed on a machine already logged in to Claude Code. |
-| `GITHUB_TOKEN` | Fine-grained token (or GitHub App token) with **read-only Contents** on your org's repos. Passed to git through the environment, never written to `.git/config`. |
-| `VULNSCAN_GITHUB_ORG` | Refuses to scan repos outside this org. |
+| `GITHUB_TOKEN` | Token that can read the repos to scan. A classic PAT with `repo` scope covers every org its user can read; a fine-grained or GitHub App token with **read-only Contents** covers one owner. Passed to git through the environment, never written to `.git/config`. |
+| `GITHUB_TOKEN_<ORG>` | Per-org token, used instead of `GITHUB_TOKEN` for that org's repos. The name is the org in upper case with `-` changed to `_`: `GITHUB_TOKEN_SCALER_HQ` for `scaler-hq`. Needed for more than one org, because a fine-grained token only reaches one owner's repos. |
+| `VULNSCAN_GITHUB_ORG` | Refuses to scan repos outside these orgs (comma-separated, e.g. `KingsGambitLab,scaler-hq`). |
 
 Other settings: `VULNSCAN_HOME` (default `~/.vulnscan`), `VULNSCAN_TOOL_TIMEOUT` (default 1800s per scanner), `VULNSCAN_TRIAGE_TIMEOUT` (default 3600s).
 

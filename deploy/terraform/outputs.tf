@@ -8,6 +8,6 @@ output "connect" {
 }
 
 output "token_parameters" {
-  description = "Create these as SecureString parameters before running vulnscan-build."
-  value       = ["${var.ssm_prefix}/github-token", "${var.ssm_prefix}/source-token", "${var.ssm_prefix}/claude-token"]
+  description = "Replace the placeholder values of these before scanning (and add source-token if the vulnscan repo is private)."
+  value       = [for p in aws_ssm_parameter.token : p.name]
 }

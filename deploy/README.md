@@ -34,23 +34,26 @@ terraform plan
 terraform apply
 ```
 
-State is kept locally in `terraform.tfstate`; keep that file safe. It holds no secrets, because the tokens never pass through Terraform.
+State is kept locally in `terraform.tfstate`; keep that file safe. It holds no secrets: the token parameters use the write-only `value_wo`, so their values are never stored in state.
 
 ## Add the tokens
 
-Add the tokens by hand rather than through Terraform, so they never end up in the state file:
+`terraform apply` creates `/vulnscan/github-token` and `/vulnscan/claude-token` with the placeholder value `todo update me`. Replace the placeholders by hand. Terraform won't overwrite your values, and they never reach its state file:
 
 ```bash
-read -rs GH && aws ssm put-parameter --region <region> --type SecureString \
+read -rs GH && aws ssm put-parameter --region <region> --overwrite \
   --name /vulnscan/github-token --value "$GH"; unset GH
+read -rs CT && aws ssm put-parameter --region <region> --overwrite \
+  --name /vulnscan/claude-token --value "$CT"; unset CT
+# only if the vulnscan repo is private (not created by Terraform):
 read -rs ST && aws ssm put-parameter --region <region> --type SecureString \
   --name /vulnscan/source-token --value "$ST"; unset ST
-read -rs CT && aws ssm put-parameter --region <region> --type SecureString \
-  --name /vulnscan/claude-token --value "$CT"; unset CT
 ```
 
-- **`github-token`**: a fine-grained token, or a GitHub App token, with read-only Contents on the repos to be scanned. Used by `vulnscan scan`.
-- **`source-token`**: a fine-grained token with read-only Contents on the vulnscan repo only. Used by `vulnscan-build`. It's separate because a fine-grained token can only reach one owner's repos.
+- **`github-token`**: a classic personal access token with the `repo` scope, from a user who can read every org in `github_org`. Used by `vulnscan scan`.
+  - If an org uses SAML single sign-on, authorize the token for it (*Configure SSO* on the token's page).
+  - `repo` also allows pushing to those repos, so give the token an expiry, and revoke it if the instance is ever suspected compromised.
+- **`source-token`** (only if the vulnscan repo is private): a fine-grained token with read-only Contents on the vulnscan repo only. Used by `vulnscan-build`. It's separate because a fine-grained token can only reach one owner's repos.
 - **`claude-token`**: the output of `claude setup-token`.
 
 ## Build and scan

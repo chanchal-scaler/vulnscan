@@ -14,7 +14,7 @@ variable "subnet_cidr" {
 }
 
 variable "github_org" {
-  description = "GitHub org whose repos may be scanned (VULNSCAN_GITHUB_ORG)."
+  description = "GitHub orgs whose repos may be scanned, comma-separated (VULNSCAN_GITHUB_ORG)."
   type        = string
 }
 
