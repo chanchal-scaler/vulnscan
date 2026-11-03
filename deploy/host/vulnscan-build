@@ -1,0 +1,31 @@
+#!/bin/bash
+# Fetch (or update) the vulnscan source from GitHub and rebuild the scanner image. Run as root.
+set -euo pipefail
+. /etc/vulnscan/config
+
+# Its own token: a fine-grained token can only reach one owner's repos, and the vulnscan
+# repo may live under a different owner than the repos being scanned.
+token=$(aws ssm get-parameter --region "$AWS_REGION" --name "$SSM_PREFIX/source-token" \
+  --with-decryption --query Parameter.Value --output text)
+auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+
+# Same as vulnscan itself: the token reaches git through the environment, never .git/config.
+gitauth() {
+  GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="$auth" \
+    git "$@"
+}
+
+src=/opt/vulnscan-src
+if [ -d "$src/.git" ]; then
+  gitauth -C "$src" fetch --depth 1 origin "$VULNSCAN_SOURCE_REF"
+  git -C "$src" reset --hard FETCH_HEAD
+else
+  gitauth clone --depth 1 --branch "$VULNSCAN_SOURCE_REF" "https://github.com/$VULNSCAN_SOURCE_REPO.git" "$src"
+fi
+
+# --pull picks up security fixes in the base image; the tools themselves stay pinned.
+docker build --pull -t vulnscan:latest "$src"
+install -m 755 "$src/deploy/host/vulnscan" /usr/local/bin/vulnscan
+docker image prune -f
+docker builder prune -f

@@ -1,0 +1,36 @@
+#!/bin/bash
+# First-boot setup. Output is in /var/log/cloud-init-output.log.
+set -euo pipefail
+
+dnf install -y docker git
+systemctl enable --now docker
+
+# Reports volume: wait for it to be attached, format it only if blank, mount it.
+dev=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${data_volume}
+for _ in $(seq 60); do [ -e "$dev" ] && break; sleep 5; done
+blkid "$dev" >/dev/null || mkfs.xfs "$dev"
+mkdir -p /var/lib/vulnscan
+echo "UUID=$(blkid -s UUID -o value "$dev") /var/lib/vulnscan xfs defaults,nofail 0 2" >> /etc/fstab
+systemctl daemon-reload
+mount /var/lib/vulnscan
+# Owned by the container's scanner user (uid 10001); root can read it too.
+install -d -o 10001 -g 10001 -m 700 /var/lib/vulnscan/scans
+
+mkdir -p /etc/vulnscan
+cat > /etc/vulnscan/config <<'VULNSCAN_EOF'
+AWS_REGION=${region}
+SSM_PREFIX=${ssm_prefix}
+VULNSCAN_GITHUB_ORG=${github_org}
+VULNSCAN_SOURCE_REPO=${source_repo}
+VULNSCAN_SOURCE_REF=${source_ref}
+VULNSCAN_EOF
+
+cat > /usr/local/bin/vulnscan-build <<'VULNSCAN_EOF'
+${build_script}
+VULNSCAN_EOF
+
+cat > /usr/local/bin/vulnscan <<'VULNSCAN_EOF'
+${wrapper_script}
+VULNSCAN_EOF
+
+chmod 755 /usr/local/bin/vulnscan-build /usr/local/bin/vulnscan

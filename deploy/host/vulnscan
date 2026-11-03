@@ -1,0 +1,23 @@
+#!/bin/bash
+# Run vulnscan in a throwaway container. Run as root, e.g. `vulnscan scan your-org/repo`.
+# The host fetches the tokens with the instance role. The container gets no AWS access
+# (IMDS hop limit 1), no Linux capabilities, and only the reports directory.
+set -euo pipefail
+. /etc/vulnscan/config
+
+param() {
+  aws ssm get-parameter --region "$AWS_REGION" --name "$SSM_PREFIX/$1" \
+    --with-decryption --query Parameter.Value --output text
+}
+GITHUB_TOKEN=$(param github-token)
+CLAUDE_CODE_OAUTH_TOKEN=$(param claude-token)
+export GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN VULNSCAN_GITHUB_ORG
+
+# -e NAME without a value copies it from this environment, keeping tokens off the command line.
+# --memory leaves ~2 GB for the host on the default t4g.large.
+exec docker run --rm --init \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --memory 6g --pids-limit 1024 \
+  -e GITHUB_TOKEN -e CLAUDE_CODE_OAUTH_TOKEN -e VULNSCAN_GITHUB_ORG \
+  -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans \
+  vulnscan:latest "$@"
