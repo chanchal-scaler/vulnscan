@@ -198,6 +198,18 @@ resource "aws_instance" "this" {
     cpu_credits = "standard"
   }
 
+  # Spot: about 60% cheaper. If AWS reclaims the capacity, the instance stops (both disks
+  # are kept) and starts again by itself when capacity returns; a scan running at that
+  # moment has to be re-run. To go back to on-demand, remove this block.
+  instance_market_options {
+    market_type = "spot"
+
+    spot_options {
+      spot_instance_type             = "persistent"
+      instance_interruption_behavior = "stop"
+    }
+  }
+
   tags = { Name = var.name }
 
   # user_data only runs on first boot. To apply a newer AMI or user_data, run

@@ -59,11 +59,12 @@ read -rs ST && aws ssm put-parameter --region <region> --type SecureString \
 ## Build and scan
 
 ```bash
-$(terraform output -raw connect)    # opens a shell on the instance
-sudo -i
+eval "$(terraform output -raw connect)"   # opens a root shell on the instance
 vulnscan-build                      # clone the vulnscan repo and build the image; takes about 5 minutes
 vulnscan scan your-org/some-repo    # also takes --ref, --no-llm and the other usual flags
 ```
+
+The connect command starts the session with `sudo -i`. That skips the account-wide Session Manager shell profile, which a plain `aws ssm start-session` runs; the profile is written for the Rails app servers and only prints errors here.
 
 Reports are written to `/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/`. The wrapper scans GitHub repos only; local paths on the instance aren't mounted into the container.
 
