@@ -13,7 +13,9 @@ ARG CHECKOV_VERSION=3.4.3
 ARG BANDIT_VERSION=1.9.4
 ARG BRAKEMAN_VERSION=8.1.0
 
-RUN apt-get update \
+# apt over HTTPS: the EC2 instance only allows outbound 443.
+RUN sed -i 's#http://deb.debian.org#https://deb.debian.org#g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git ruby \
  && rm -rf /var/lib/apt/lists/*
 
