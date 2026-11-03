@@ -66,6 +66,11 @@ vulnscan scan your-org/some-repo    # also takes --ref, --no-llm and the other u
 
 The connect command starts the session with `sudo -i`. That skips the account-wide Session Manager shell profile, which a plain `aws ssm start-session` runs; the profile is written for the Rails app servers and only prints errors here.
 
+Scans run in a detached container, so they keep going if the session ends. This account caps Session Manager sessions at 60 minutes, and ends them after 40 minutes without output.
+- **Reattach:** run `docker logs -f <id>`; the wrapper prints the container ID when it starts.
+- **Ctrl-C** only stops following the output, not the scan.
+- **Big repos:** each scanner is stopped after 30 minutes by default. Raise the limit with `VULNSCAN_TOOL_TIMEOUT=3600 vulnscan scan ...`, and set `VULNSCAN_TRIAGE_TIMEOUT` the same way for Claude's review.
+
 Reports are written to `/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/`. The wrapper scans GitHub repos only; local paths on the instance aren't mounted into the container.
 
 ## Maintenance

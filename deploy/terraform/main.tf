@@ -193,9 +193,11 @@ resource "aws_instance" "this" {
     encrypted   = true
   }
 
-  # Throttle to baseline instead of paying for extra CPU (t-family only).
+  # Unlimited (t-family only): T3/T4g get no launch credits, so in "standard" mode a new
+  # instance is throttled to its 30% baseline straight away. Extra CPU is only billed
+  # ($0.05/vCPU-hour) if the 24-hour average stays above that baseline.
   credit_specification {
-    cpu_credits = "standard"
+    cpu_credits = "unlimited"
   }
 
   # Spot: about 60% cheaper. If AWS reclaims the capacity, the instance stops (both disks

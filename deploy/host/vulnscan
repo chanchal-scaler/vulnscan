@@ -14,11 +14,25 @@ GITHUB_TOKEN=$(param github-token)
 CLAUDE_CODE_OAUTH_TOKEN=$(param claude-token)
 export GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN VULNSCAN_GITHUB_ORG
 
-# -e NAME without a value copies it from this environment, keeping tokens off the command line.
-# --memory leaves ~2 GB for the host on the default t4g.large.
-exec docker run --rm --init \
+# Remove containers left by earlier scans whose session ended before they finished.
+docker container prune -f --filter label=vulnscan >/dev/null
+
+# Detached, so the scan keeps running if the Session Manager session ends (the account
+# caps sessions at 60 minutes); this script just streams its output.
+# -e NAME without a value copies it from this environment, keeping tokens off the command
+# line; the timeouts are only passed when set, e.g. VULNSCAN_TOOL_TIMEOUT=3600 vulnscan scan ...
+# --memory leaves ~2 GB for the host on an 8 GB instance.
+cid=$(docker run -d --init --label vulnscan \
   --cap-drop ALL --security-opt no-new-privileges \
   --memory 6g --pids-limit 1024 \
   -e GITHUB_TOKEN -e CLAUDE_CODE_OAUTH_TOKEN -e VULNSCAN_GITHUB_ORG \
+  -e VULNSCAN_TOOL_TIMEOUT -e VULNSCAN_TRIAGE_TIMEOUT \
   -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans \
-  vulnscan:latest "$@"
+  vulnscan:latest "$@")
+id=${cid:0:12}
+echo "[vulnscan] running in container $id; it keeps going if this session ends (reattach: docker logs -f $id)" >&2
+trap 'echo >&2; echo "[vulnscan] stopped following; the scan continues (reattach: docker logs -f $id)" >&2; exit 130' INT
+docker logs -f "$cid" || true
+code=$(docker wait "$cid")
+docker rm "$cid" >/dev/null
+exit "$code"
