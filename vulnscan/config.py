@@ -13,7 +13,8 @@ WORK_DIR = HOME / "work"
 GITHUB_ORGS = [o.strip() for o in os.environ.get("VULNSCAN_GITHUB_ORG", "").split(",") if o.strip()]
 
 TOOL_TIMEOUT = int(os.environ.get("VULNSCAN_TOOL_TIMEOUT", "1800"))
-TRIAGE_TIMEOUT = int(os.environ.get("VULNSCAN_TRIAGE_TIMEOUT", "3600"))
+TRIAGE_TIMEOUT = int(os.environ.get("VULNSCAN_TRIAGE_TIMEOUT", "3600"))  # per Claude batch
+TRIAGE_BATCH = int(os.environ.get("VULNSCAN_TRIAGE_BATCH", "100"))  # items per Claude batch
 
 # Variables scanners may see. Everything else (GITHUB_TOKEN, CLAUDE_CODE_OAUTH_TOKEN,
 # AWS_* and so on) is withheld so a tool can never leak it.

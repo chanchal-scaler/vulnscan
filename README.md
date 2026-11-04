@@ -12,12 +12,17 @@ vulnscan scan your-org/some-repo
 2. **Detect**: finds stacks from marker files (`Gemfile` + `config/application.rb` means Rails, `go.mod` means Go, `*.tf`/`Dockerfile` means IaC, and so on).
 3. **Install**: installs any scanner that's missing into `~/.vulnscan/tools`, isolated from the rest of the system (pip tools get their own virtualenv, gems go to their own directory, GitHub release binaries are checked against the release checksums).
 4. **Scan**: runs every scanner that applies and converts their output into one finding format.
-5. **Triage**: Claude Code gives each finding a verdict (confirmed / false positive / duplicate / needs review), re-rates its severity, suggests a fix, and reviews entry points for SSRF, missing authorization, IDOR and similar issues.
+5. **Triage**: Claude Code gives each finding a verdict (confirmed / false positive / duplicate / needs review), re-rates its severity, suggests a fix, and reviews entry points for SSRF, missing authorization, IDOR and similar issues. On big repos the findings are first grouped and prioritised:
+   - **Dependencies:** each vulnerable package version is one item, covering all its advisories and lockfiles.
+   - **Repeated rules:** a rule with more than 10 hits is one item, judged from 5 sample locations. Brakeman warnings are never grouped.
+   - **Order:** critical/high secrets and code first, then config, then dependencies.
+   - **Batches:** Claude reviews 100 items per call. Only the first call also reviews the code for issues the scanners missed.
 6. **Report**: writes to `~/.vulnscan/scans/<org>__<repo>/<timestamp>/`:
    - `report.md`: for people
    - `report.json`: every finding with its triage result
+   - `report.csv`: the same, one row per finding, for spreadsheets
    - `raw/`: each scanner's original output
-   - `claude.json`: the raw Claude response, for audit
+   - `claude-<batch>.json`: the raw Claude responses, for audit
 
 | Scanner | Runs on | Installed via |
 |---|---|---|
@@ -63,7 +68,7 @@ vulnscan scan your-org/repo                          # default branch
 vulnscan scan https://github.com/your-org/repo --ref release-2026-11
 vulnscan scan ~/development/some-app --no-llm        # local dir, scanners only
 vulnscan scan your-org/repo --model opus             # pick the triage model
-vulnscan scan your-org/repo --max-triage 300         # send more findings to Claude (default 150)
+vulnscan scan your-org/repo --max-triage 600         # let Claude review more items (default 400)
 vulnscan tools                                       # what's installed
 ```
 
@@ -106,4 +111,4 @@ class Pipaudit(Tool):
 - **Scanners run on the host when run directly.** The EC2 deployment runs each scan in a fresh container with no AWS access.
 - **Claude auth uses a personal subscription token.** It's tied to one person's plan and usage limits. Switching to Amazon Bedrock (`CLAUDE_CODE_USE_BEDROCK=1` plus the instance IAM role, so there's no static secret) or an Anthropic API key needs no code change, because Claude Code reads both from the environment.
 - **No scheduling or alerting yet.** Nightly re-scans are what catch newly published CVEs in existing lockfiles. A stopgap is a cron job running `vulnscan scan`, followed by grepping `report.json` for confirmed `critical`/`high` findings.
-- **Large repos only get the top 150 findings triaged** (raise it with `--max-triage`). The rest appear in the report as "Not triaged".
+- **Claude reviews at most 400 items per scan.** Raise the limit with `--max-triage`; items beyond it appear in the report as "Not triaged". A grouped rule is judged from 5 samples, so a confirmed group doesn't mean every hit was checked. Its `reviewed_as` column in `report.csv` says so.

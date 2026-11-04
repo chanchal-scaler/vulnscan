@@ -54,7 +54,9 @@ def main(argv=None):
     s.add_argument("--ref", help="branch or tag to scan (default: the repo's default branch)")
     s.add_argument("--no-llm", action="store_true", help="skip Claude triage and review")
     s.add_argument("--model", help="Claude model for triage, e.g. opus (default: Claude Code's default)")
-    s.add_argument("--max-triage", type=int, default=150, help="max findings sent to Claude, highest severity first (default: 150)")
+    s.add_argument("--max-triage", type=int, default=400,
+                   help="max items Claude reviews, most important first; a dependency or a rule with many hits "
+                        "counts as one item (default: 400, in batches of 100)")
     s.add_argument("--keep-clone", action="store_true", help="keep the cloned repo after the scan")
     s.set_defaults(func=_cmd_scan)
 

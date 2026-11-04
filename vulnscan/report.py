@@ -1,7 +1,13 @@
+import csv
 import json
 from collections import Counter
 
 from .findings import SEVERITIES
+
+CSV_COLUMNS = [
+    "id", "verdict", "severity", "scanner_severity", "tool", "rule", "category", "file", "line", "title",
+    "package", "version", "fixed_version", "reviewed_as", "reason", "fix", "reference",
+]
 
 
 def _cell(text, limit=120):
@@ -24,12 +30,44 @@ def _verdict(f):
     return (f.triage or {}).get("verdict")
 
 
+def _csv_value(value):
+    # Scanner output quotes repo content, so stop spreadsheets from running it as a formula.
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def write_csv(path, findings, additional):
+    """One row per finding (Claude's additional findings first), for spreadsheets."""
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        out = csv.DictWriter(fh, fieldnames=CSV_COLUMNS)
+        out.writeheader()
+        for i, a in enumerate(additional, 1):
+            row = {"id": f"C{i:02d}", "verdict": "found by Claude", "severity": a["severity"], "tool": "claude",
+                   "file": a["file"], "line": a.get("line"), "title": a["title"],
+                   "reason": a["description"], "fix": a["fix"]}
+            out.writerow({k: _csv_value(v) for k, v in row.items()})
+        for f in findings:
+            t = f.triage or {}
+            row = {
+                "id": f.id, "verdict": t.get("verdict", "not triaged"), "severity": f.final_severity,
+                "scanner_severity": f.severity, "tool": f.tool, "rule": f.rule_id, "category": f.category,
+                "file": f.file, "line": f.line, "title": f.title, "package": f.package, "version": f.version,
+                "fixed_version": f.fixed_version, "reviewed_as": t.get("scope"), "reason": t.get("reason"),
+                "fix": t.get("fix"), "reference": f.references[0] if f.references else None,
+            }
+            out.writerow({k: _csv_value(v) for k, v in row.items()})
+
+
 def write_reports(run_dir, meta, findings, triage_result):
-    """Write report.json (everything) and report.md (for people). Returns the markdown path."""
+    """Write report.json (everything), report.csv (one row per finding) and report.md (for people).
+
+    Returns the markdown path.
+    """
     additional = (triage_result or {}).get("additional_findings", [])
     data = dict(meta, summary=(triage_result or {}).get("summary"),
                 findings=[f.to_dict() for f in findings], additional_findings=additional)
     (run_dir / "report.json").write_text(json.dumps(data, indent=2))
+    write_csv(run_dir / "report.csv", findings, additional)
 
     confirmed = [f for f in findings if _verdict(f) == "confirmed"]
     review = [f for f in findings if _verdict(f) == "needs_review"]
@@ -47,10 +85,14 @@ def write_reports(run_dir, meta, findings, triage_result):
 
     t = meta["triage"]
     triage_line = t["status"]
-    if t.get("cost_usd") is not None:
-        triage_line += f" (${t['cost_usd']:.2f}, {t['triaged']} findings sent)"
-    if t.get("error"):
-        triage_line += f": {_cell(t['error'], 300)}"
+    if t.get("items") is not None:
+        triage_line += (f" ({t['items']} of {t['items_total']} items reviewed in {t['batches']} batch(es),"
+                        f" covering {t['findings_covered']} findings")
+        if t.get("cost_usd") is not None:
+            triage_line += f", ${t['cost_usd']:.2f} at API rates"
+        triage_line += ")"
+    for err in t.get("errors", []):
+        triage_line += f"\n  - error: {_cell(err, 300)}"
 
     md = [
         f"# Security scan: {meta['repo']}",
@@ -68,14 +110,23 @@ def write_reports(run_dir, meta, findings, triage_result):
 
     if confirmed:
         md += ["", f"## Confirmed findings ({len(confirmed)})", _table(confirmed)]
+        per_group = Counter(f.triage.get("group") for f in confirmed)
+        shown = set()
         for f in confirmed:
+            group = f.triage.get("group")
+            if group in shown:  # a grouped item gets one section, not one per hit
+                continue
+            if group:
+                shown.add(group)
             md += [
-                "", f"### {f.id} · {f.final_severity.upper()} · {_cell(f.title, 160)}",
-                f"- Location: `{f.location}`",
+                "", f"### {group or f.id} · {f.final_severity.upper()} · {_cell(f.title, 160)}",
+                f"- Location: `{f.location}`" + (f" and {per_group[group] - 1} more (see report.csv)"
+                                                  if group and per_group[group] > 1 else ""),
                 f"- Tool: {f.tool} (`{f.rule_id}`)",
-                f"- Why: {f.triage.get('reason', '')}",
-                f"- Fix: {f.triage.get('fix', '')}",
             ]
+            if group:
+                md.append(f"- Reviewed as: {f.triage['scope']}")
+            md += [f"- Why: {f.triage.get('reason', '')}", f"- Fix: {f.triage.get('fix', '')}"]
             if f.references:
                 md.append(f"- Ref: {f.references[0]}")
 

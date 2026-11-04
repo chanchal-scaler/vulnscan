@@ -8,7 +8,7 @@ from .installer import InstallError, ensure
 from .repo import checkout, git_head
 from .report import severity_counts, write_reports
 from .tools import ALL_TOOLS
-from .triage import TriageError, triage
+from .triage import triage
 
 
 def _run_tools(repo, stacks, raw_dir):
@@ -46,7 +46,7 @@ def _run_tools(repo, stacks, raw_dir):
     return findings, runs
 
 
-def scan(spec, ref=None, use_llm=True, model=None, max_triage=150, keep_clone=False):
+def scan(spec, ref=None, use_llm=True, model=None, max_triage=400, keep_clone=False):
     """Scan a repo and write reports. Returns (report_path, open severity counts)."""
     with checkout(spec, ref, keep_clone) as (repo, label):
         now = datetime.now(timezone.utc)
@@ -64,17 +64,9 @@ def scan(spec, ref=None, use_llm=True, model=None, max_triage=150, keep_clone=Fa
 
         result, triage_meta = None, {"status": "skipped (--no-llm)"}
         if use_llm:
-            to_triage = [f for f in findings if f.severity != "info"][:max_triage]
-            log(f"claude: triaging {len(to_triage)} findings and reviewing the code (this can take a while)")
-            try:
-                result, cost = triage(to_triage, repo, list(stacks), run_dir, model)
-                by_id = {t["id"]: t for t in result.get("findings", [])}
-                for f in to_triage:
-                    f.triage = by_id.get(f.id)
-                triage_meta = {"status": "done", "cost_usd": cost, "triaged": len(to_triage)}
-            except TriageError as e:
-                log(f"claude: triage failed: {e}")
-                triage_meta = {"status": "failed", "error": str(e)}
+            result, triage_meta = triage(
+                [f for f in findings if f.severity != "info"], repo, list(stacks), run_dir, model, max_triage,
+            )
             findings.sort(key=sort_key)
 
         meta = {
