@@ -286,7 +286,8 @@ def _write_reports(run_dir, meta, findings, items):
     not_referenced = [it for it in items if it["id"] not in referenced]
 
     data = dict(meta, summary=_counts(findings), findings=findings,
-                coverage={"items_sent": len(items), "referenced": sorted(referenced),
+                coverage={"items_sent": len(items), "sent": [it["id"] for it in items],
+                          "referenced": sorted(referenced),
                           "not_referenced": [it["id"] for it in not_referenced]})
     (run_dir / "validation.json").write_text(json.dumps(data, indent=2))
 
@@ -302,7 +303,9 @@ def _write_reports(run_dir, meta, findings, items):
     md = [
         f"# Validation: {meta['repo']}",
         "",
-        f"- Validated: {meta['validated_at']}",
+        f"- Validated: {meta['validated_at']}"
+        + (f" (--only {', '.join(meta['only'])}; validated findings from earlier runs on this scan are kept)"
+           if meta.get("only") else ""),
         f"- Stage-1 scan: {meta['run']}" + (f" (commit `{meta['stage1_commit']}`)" if meta.get("stage1_commit") else ""),
         f"- Commit: `{meta['commit'] or 'n/a'}`",
         f"- Model: {meta['model']} · mode: {meta['scan_mode']} · budget: ${meta['budget_usd']}",
@@ -359,10 +362,13 @@ def _counts(findings):
 
 
 def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="standard",
-             budget=None, max_items=100, instructions=()):
-    """Validate a finished scan's open findings with Strix (GLM via OpenRouter).
+             budget=None, max_items=100, instructions=(), only=()):
+    """Validate a finished scan's open findings (or only those in `only`) with Strix (GLM via OpenRouter).
 
-    Returns (validation_md_path, severity counts of validated findings). Raises
+    With `only`, the validated findings already in validation.json are kept and new ones are
+    numbered after them, so existing V ids (and the fix branches named after them) never change.
+
+    Returns (validation_md_path, severity counts of this run's validated findings). Raises
     ValidateError/RepoError on bad input, or after writing partial reports if Strix failed.
     """
     model = model or os.environ.get("STRIX_LLM") or DEFAULT_MODEL
@@ -370,13 +376,32 @@ def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="stand
     label = _label_for(spec)
     run_dir = _resolve_run_dir(label, run_dir)
     report = json.loads((run_dir / "report.json").read_text())
-    items = open_items(report, max_items)
+    wanted = sorted({i.strip().upper() for i in only if i.strip()})
+    if wanted:
+        items = [it for it in open_items(report, None) if it["id"] in wanted]
+        unknown = set(wanted) - {it["id"] for it in items}
+        if unknown:
+            raise ValidateError(f"no open finding {', '.join(sorted(unknown))} in {run_dir}/report.json"
+                                " (false positives and duplicates aren't validated)")
+    else:
+        items = open_items(report, max_items)
+
+    earlier = None
+    if wanted and (run_dir / "validation.json").is_file():
+        earlier = json.loads((run_dir / "validation.json").read_text())
+    kept, sent_items = [], items
+    if earlier is not None:
+        kept = earlier.get("findings") or []
+        cov = earlier.get("coverage") or {}
+        # A validation.json written before --only existed has no "sent": its run sent the worst `items_sent`.
+        sent = set(cov.get("sent") or [it["id"] for it in open_items(report, earlier.get("items_sent") or 0)])
+        sent_items = [it for it in open_items(report, None) if it["id"] in sent | set(wanted)]
 
     meta = {
         "repo": label, "commit": None, "stage1_commit": report.get("commit"),
         "validated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "run": run_dir.name, "model": model, "scan_mode": scan_mode, "budget_usd": budget,
-        "urls": list(urls), "items_sent": len(items),
+        "urls": list(urls), "items_sent": len(sent_items), "only": wanted or None,
         "strix": {"status": "skipped", "exit_code": None, "cost_usd": None, "duration_s": None, "errors": []},
     }
 
@@ -393,12 +418,14 @@ def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="stand
     with checkout(spec, ref) as (repo, _label):
         # Re-validating renumbers V001…, which would no longer match the fix branches and PRs
         # named after them. fix only runs on GitHub repos, so only those can have such branches.
-        pushed = _fix_branches(repo, run_dir.name, git_env(parsed[0])) if parsed else []
+        # --only adds after the existing ids instead, so it needs no check.
+        pushed = _fix_branches(repo, run_dir.name, git_env(parsed[0])) if parsed and earlier is None else []
         if pushed:
             raise ValidateError(
                 f"{run_dir.name} already has fix branches on GitHub ({', '.join(pushed[:3])}"
                 f"{', …' if len(pushed) > 3 else ''}): re-validating would renumber its V ids so they no longer match"
-                " those branches and PRs. Run a new scan and validate that, or delete those branches first")
+                " those branches and PRs. Validate single findings with --only (it keeps the existing V ids),"
+                " run a new scan and validate that, or delete those branches first")
         head = git_head(repo)
         meta["commit"] = head
         if report.get("commit") and head != report["commit"]:
@@ -461,13 +488,14 @@ def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="stand
             error = error or "strix exited 2 (findings found) but none could be parsed from raw/strix/"
         order = {s: i for i, s in enumerate(SEVERITIES)}
         findings.sort(key=lambda f: (order.get(f["severity"], 4), f["file"], f["line"] or 0))
-        for i, f in enumerate(findings, 1):
+        for i, f in enumerate(findings, len(kept) + 1):
             f["id"] = f"V{i:03d}"
             text = " ".join((f["title"], f["description"], f["poc"]))
             f["validates"] = sorted(set(_ID_RE.findall(text)))
-        log(f"validation: {len(findings)} validated finding(s)")
+        log(f"validation: {len(findings)} validated finding(s)"
+            + (f", plus {len(kept)} kept from earlier runs" if kept else ""))
 
-        path = _write_reports(run_dir, meta, findings, items)
+        path = _write_reports(run_dir, meta, kept + findings, sent_items)
         if error:
             raise ValidateError(f"{error}; partial results in {path}")
         return path, _counts(findings)

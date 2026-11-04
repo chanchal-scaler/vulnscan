@@ -53,6 +53,11 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 - **Two fixes (local, 2026-11-05):**
   - Claude's own findings in mixed order now get the same `C…` ids in `report.json`, `report.csv`, `report.md` and `validate.open_items`.
   - With a stand-in Strix and a local bare repo, `validate` refuses when the run has `vulnscan/fix-<run>-*` branches, before Strix starts. It runs when there are none, or only another run's, and skips the check for a local folder.
+- **`validate --only` (local, 2026-11-05):** tested with a stand-in Strix and a local bare repo (26 checks):
+  - Unknown IDs and false positives exit 2 before cloning.
+  - Earlier `V…` ids are kept and new ones appended, and coverage merges, including from a `validation.json` without `coverage.sent`.
+  - It runs past a fix branch while a full re-validation is still refused, and the dashboard reads the merged file.
+  - Not yet run with real Strix.
 
 ## Scans run
 

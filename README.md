@@ -87,6 +87,7 @@ Detection is only the first stage. `vulnscan validate` re-checks a finished scan
 - **Model:** `--model`, or `STRIX_LLM`, defaults to `openrouter/z-ai/glm-5.3`; the OpenRouter key goes in `LLM_API_KEY` (or `OPENROUTER_API_KEY`). Strix only reports a finding it could actually reproduce.
 - **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
 - **Re-validating** the same scan writes new `V…` ids. That's refused once `vulnscan fix` has pushed branches for the scan, because they're named after the old ids. Run a new scan instead, which is also what checks the fixes.
+- **`--only F003`** validates just that open finding (repeat it for several; `C01` works too). It adds to `validation.json` instead of replacing it: earlier validated findings keep their `V…` ids and new ones get the next ids, so it still works after fix PRs exist. A false positive, duplicate or unknown ID is an error (exit 2), caught before anything is cloned. Validating the same finding again adds a second `V…` id rather than replacing the first. Run one validate per scan at a time.
 - **On the instance:** it runs like a scan. The wrapper gives **validate containers only** the Docker socket (Strix starts its pentest sandbox on the host daemon — the one deliberate exception to the hardened container), reads the OpenRouter key from Parameter Store, and refuses to run while it's still the placeholder. The repo copy Strix tests is placed in the run folder, on the path mounted on both sides.
 
 ```bash
@@ -94,6 +95,7 @@ vulnscan validate your-org/repo                          # latest scan, repo + G
 vulnscan validate your-org/repo --url https://staging.example.com
 vulnscan validate your-org/repo --scan-mode deep --max-validate 200
 vulnscan validate your-org/repo --instruction "login: user/pass" --budget 10
+vulnscan validate your-org/repo --only F003              # just one open finding (repeat --only for more)
 ```
 
 Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https://strix.ai/install | bash`) and `LLM_API_KEY`. A `quick` mode run takes minutes; `deep` can take hours. On the instance the image contains Strix at a pinned version and the wrapper fetches the key from Parameter Store (`/vulnscan/openrouter-token`, [deploy/README.md](deploy/README.md#add-the-tokens)); see [docs/operations.md](docs/operations.md#run-a-validation-stage-2).

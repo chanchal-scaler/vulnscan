@@ -76,6 +76,7 @@ After a finished scan of the repo, `vulnscan validate` re-checks its open findin
 vulnscan validate KingsGambitLab/<repo>                        # the repo's latest scan, standard mode, budget $25
 vulnscan validate KingsGambitLab/<repo> --scan-mode quick --budget 5
 vulnscan validate scaler-hq/<repo> --url https://staging.example.com --instruction "login: user/pass"
+vulnscan validate scaler-hq/<repo> --only F003                 # just one open finding from report.md (repeat --only for more)
 ```
 
 - Read `validation.md` in the same run folder as the scan (`/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/`): validated findings with PoCs, and the stage-1 ids they confirm. Strix's own artifacts are under `raw/strix/`.
@@ -83,6 +84,7 @@ vulnscan validate scaler-hq/<repo> --url https://staging.example.com --instructi
 - The wrapper gives **validate containers only** the Docker socket (Strix runs its sandbox on the host); a validate run also copies the repo into the run folder, which briefly doubles its disk use there.
 - Stage 1 doesn't need re-running: validate reads the newest `report.json` for that repo and clones the repo itself.
 - Re-validating the same scan is refused once `vulnscan fix` has pushed branches for it, because new `V…` ids wouldn't match them. Run a new scan instead.
+- `--only` adds to `validation.md` and `validation.json` instead of replacing them: earlier findings keep their `V…` ids and new ones get the next ids, so it works even after fix PRs exist. Run one validate per scan at a time, because concurrent runs share the run folder's scratch files.
 - Sessions still end after 60 minutes; validation is detached like a scan, so reattach with `docker logs -f <id>`.
 
 ## Fix validated findings (stage 3)
@@ -244,7 +246,7 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `validate`: `strix CLI not found on PATH` | The image predates stage 2 | Run `vulnscan-build`, then retry |
 | `validate`: `no finished scan for <repo>` | There's no run folder with a `report.json` for that repo | Run `vulnscan scan` first, or pass `--run <folder>` |
 | `validate`: `permission denied … /var/run/docker.sock` | The socket's group wasn't added, or Docker restarted and changed its group id | Re-run; if it persists, check `stat -c %g /var/run/docker.sock` on the host and the wrapper's `--group-add` |
-| `validate`: `… already has fix branches on GitHub` | `vulnscan fix` already opened branches or PRs for that scan's `V…` ids | Expected. Run `vulnscan scan` again and validate the new run. Or, if those PRs are abandoned, close them and delete their branches first. |
+| `validate`: `… already has fix branches on GitHub` | `vulnscan fix` already opened branches or PRs for that scan's `V…` ids | Expected. Validate single findings with `--only`, which keeps the existing `V…` ids. Or run `vulnscan scan` again and validate the new run. Or, if those PRs are abandoned, close them and delete their branches first. |
 | `validate` stops with a budget message | The `--max-budget` cap was reached; partial results are still written | Re-run with a higher `--budget`, or fewer items (`--max-validate`) |
 | `report.json` says the volume is filling during `validate` | The repo copy (`strix-target/`) briefly doubles the repo's size on the reports volume | Grow `data_volume_gb` ([deploy/README.md](../deploy/README.md#maintenance)), or validate big repos one `--ref` at a time |
 | `fix`: `no validated scan for <repo>` | No run folder has a `validation.json` | Run `vulnscan validate` first, or pass `--run <folder>` |

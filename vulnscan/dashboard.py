@@ -147,7 +147,7 @@ def _run_data(run_dir):
         elif r["id"] in not_referenced:
             r["strix"] = "not validated"
         else:
-            r["strix"] = "not sent"  # beyond --max-validate
+            r["strix"] = "not sent"  # beyond --max-validate, or not picked with --only
     rows.sort(key=lambda r: SEV_ORDER.get(r["severity"], 2))
     data["open"] = rows
     return data

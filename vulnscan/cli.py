@@ -33,7 +33,7 @@ def _cmd_validate(args):
         report, counts = validate(
             args.repo, run_dir=args.run, ref=args.ref, urls=args.url or [], model=args.model,
             scan_mode=args.scan_mode, budget=args.budget, max_items=args.max_validate,
-            instructions=args.instruction or [],
+            instructions=args.instruction or [], only=args.only or [],
         )
     except (RepoError, ValidateError) as e:
         log(str(e))
@@ -114,6 +114,9 @@ def main(argv=None):
                                                   "(repeatable; only systems you are authorised to test)")
     v.add_argument("--max-validate", type=int, default=100,
                    help="max open findings to send, worst first (default: 100)")
+    v.add_argument("--only", action="append", metavar="ID",
+                   help="validate only this open stage-1 finding, e.g. F003 or C01 (repeatable). Adds to the "
+                        "results already in validation.json instead of replacing them")
     v.add_argument("--scan-mode", choices=["quick", "standard", "deep"], default="standard",
                    help="Strix scan depth (default: standard)")
     v.add_argument("--budget", type=float,
