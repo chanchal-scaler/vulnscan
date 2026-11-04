@@ -8,7 +8,7 @@ Give it a GitHub repo, or a local folder, and it finds security problems. It:
 - can then validate the open findings with Strix, an agentic pentesting harness powered by GLM 5.3 via OpenRouter, which tries to prove each issue with a working PoC ([Validation](#validation-stage-2));
 - can then open one draft PR per validated finding, with the fix written by Claude Code ([Fixing](#fixing-stage-3)).
 
-It writes a Markdown report, JSON and CSV.
+It writes a Markdown report, JSON and CSV, and a read-only web page tracks every run through the three stages ([Dashboard](#dashboard)).
 
 ```bash
 vulnscan scan your-org/some-repo
@@ -86,6 +86,7 @@ Detection is only the first stage. `vulnscan validate` re-checks a finished scan
 - **Targets:** the repo is cloned by vulnscan itself and passed to Strix as a local directory, so the GitHub token never reaches Strix or its sandbox. `--url` adds a live target (e.g. the staging deployment) — only systems you are authorised to test.
 - **Model:** `--model`, or `STRIX_LLM`, defaults to `openrouter/z-ai/glm-5.3`; the OpenRouter key goes in `LLM_API_KEY` (or `OPENROUTER_API_KEY`). Strix only reports a finding it could actually reproduce.
 - **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
+- **Re-validating** the same scan writes new `V…` ids. That's refused once `vulnscan fix` has pushed branches for the scan, because they're named after the old ids. Run a new scan instead, which is also what checks the fixes.
 - **On the instance:** it runs like a scan. The wrapper gives **validate containers only** the Docker socket (Strix starts its pentest sandbox on the host daemon — the one deliberate exception to the hardened container), reads the OpenRouter key from Parameter Store, and refuses to run while it's still the placeholder. The repo copy Strix tests is placed in the run folder, on the path mounted on both sides.
 
 ```bash
@@ -115,7 +116,8 @@ The rules it follows:
 - **The fixes are untested.** Claude can't run the repo's code or tests, which is why the PRs are drafts.
 - **Public repos are refused** unless you pass `--dry-run`, because a public branch or PR would disclose the vulnerability before the fix is merged. Fix those through a private security advisory instead.
 - **`--dry-run`** commits the fixes in the throwaway clone and saves them as patches in `fix/`. It pushes nothing and opens no PRs.
-- **`--only V003`** fixes just that finding; repeat it for several. An ID that isn't in the run's `validation.json` is an error (exit 2), caught before anything is cloned. Each run rewrites `fix.md` and `fix.json` with only the findings it handled.
+- **`--only V003`** fixes just that finding; repeat it for several. An ID that isn't in the run's `validation.json` is an error (exit 2), caught before anything is cloned.
+- **`fix.md` and `fix.json` keep earlier fix runs' results** on the same scan, one row per finding with the time of its fix run. A later `skipped` never replaces an earlier result, such as its PR link. If the scan is re-validated and an ID now names a different finding, that earlier result is dropped.
 
 ```bash
 vulnscan fix your-org/repo                 # latest validated run, PRs against the default branch
@@ -125,6 +127,21 @@ vulnscan fix your-org/repo --ref release-2026-11 --model opus --run ~/.vulnscan/
 ```
 
 The GitHub token must be able to push branches and open PRs: a classic PAT with `repo` scope, or a fine-grained token with Contents and Pull requests set to read and write. On the instance the wrapper passes the same two tokens as for `scan`, and nothing else.
+
+## Dashboard
+
+`vulnscan dashboard` serves a read-only web page built from every run folder's `report.json`, `validation.json` and `fix.json`, read again on every request:
+- **All runs:** grouped by repo, newest first. Each shows what was discovered, what's open after triage, what Strix validated, and the fixes.
+- **One run:** the funnel (discovered → open → sent to Strix → validated → PRs opened), the validated `V…` findings with their fix status and PR link, and every open stage-1 finding with the `V…` ids that confirm it, or `not validated` / `not sent`.
+
+It never shows Strix's PoCs or serves raw files, and it has no write actions. PR status is the link only; open it on GitHub to see whether it's merged.
+
+```bash
+vulnscan dashboard                 # http://localhost:8080, from $VULNSCAN_HOME/scans
+vulnscan dashboard --port 9000
+```
+
+On the instance it isn't run through the wrapper. `vulnscan-build` starts it as its own container, reachable only on the instance's loopback, and you open it through Session Manager port forwarding ([docs/operations.md](docs/operations.md#view-the-dashboard)).
 
 ## Outputs
 
@@ -140,14 +157,14 @@ Every scan writes these files to its own folder:
 | `validation.md` / `.json` / `.csv` | Stage 2, after `vulnscan validate`: Strix's PoC-validated findings, with the stage-1 ids they confirm and a best-effort coverage list of what wasn't validated |
 | `strix-instructions.md`, `strix-findings.json` | What was sent to Strix: the generated instructions and the open findings payload |
 | `raw/strix/` | Strix's own artifacts for the validation run (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) |
-| `fix.md` / `fix.json` | Stage 3, after `vulnscan fix`: one row per validated finding, with its status (`pr opened`, `committed (dry run)`, `not fixed`, `skipped`, `failed`) and its PR link or the reason |
+| `fix.md` / `fix.json` | Stage 3, after `vulnscan fix`: one row per validated finding that any fix run on this scan handled, with its status (`pr opened`, `committed (dry run)`, `not fixed`, `skipped`, `failed`), its PR link or the reason, and when it ran |
 | `fix/` | Each fix's commit as `<V id>.patch`, and Claude's raw response as `claude-<V id>.json` |
 
 `report.csv` columns:
 
 | Column | Meaning |
 |---|---|
-| `id` | `F001`… for scanner findings, in severity order; `C01`… for Claude's own findings |
+| `id` | `F001`… for scanner findings and `C01`… for Claude's own, each in severity order. The same ids appear in `report.md`, `report.json` and the later stages. |
 | `verdict` | `confirmed`, `false_positive`, `duplicate`, `needs_review`, `not triaged`, or `found by Claude` |
 | `severity` | The final severity: Claude's re-rating if there is one, otherwise the scanner's |
 | `scanner_severity` | The scanner's own severity, normalised |
@@ -238,6 +255,10 @@ The scanner holds read access to your code and produces a list of its weaknesses
 - **Files are private.** Everything is created readable by the current user only (umask 077).
 - **The org restriction** (`VULNSCAN_GITHUB_ORG`) stops it being pointed at arbitrary repos.
 - **Validation runs inside Strix's own Docker sandbox,** which is the one place the scanned repo's code may run — deliberately, because PoC validation needs it. vulnscan clones the repo itself and passes a local directory, so the GitHub token never reaches Strix; Strix gets only its own `LLM_API_KEY`, and `--url` targets are the operator's responsibility to authorise. Local folders and stage-1 clones are copied first, because Strix mounts targets writable.
+- **The dashboard can't change anything and holds no tokens.**
+  - Findings quote repo content, so every value is escaped and the page has no JavaScript. A Content-Security-Policy blocks scripts and loads from anywhere else.
+  - Requests whose `Host` isn't localhost are refused, which stops DNS rebinding from another site in your browser.
+  - On the instance it's published on the loopback only, so seeing it takes the same Session Manager access as a shell.
 - **In production:** each scan runs in a container with no AWS credentials or Linux capabilities, on an instance that has no inbound access, allows outbound HTTPS only, and can read only its own three tokens ([deploy/README.md](deploy/README.md)). Validate containers additionally get the host Docker socket — the exception above, given to no other run.
 
 ## Adding a scanner

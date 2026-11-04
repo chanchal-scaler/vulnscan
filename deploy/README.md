@@ -96,6 +96,8 @@ Reports are written to `/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/` as `
 
 To read results, list the open critical and high findings, or copy a report to your machine, see [docs/operations.md](../docs/operations.md#read-the-results).
 
+`vulnscan-build` also starts `vulnscan-dashboard`, a read-only page that tracks every run from discovered to validated to fix PR. It has no tokens and no inbound rule, and it's published on the instance's loopback only. Open it from your machine with Session Manager port forwarding ([docs/operations.md](../docs/operations.md#view-the-dashboard)).
+
 ## Maintenance
 
 - **Updating vulnscan or the scanners:** change the code or the pinned versions in the `Dockerfile`, push, then run `vulnscan-build` again.

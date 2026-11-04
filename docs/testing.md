@@ -8,6 +8,7 @@ There's no automated test suite yet. These are the checks used during developmen
 | `triage.py` or `report.py` | 1, 2, 3, and 5 with Claude |
 | `validate.py` or its docs | 1 and 10 (and 11 once Strix is installed) |
 | `fix.py`, or `_run_claude` / `git_env` | 1, 12 and 13 |
+| `dashboard.py` | 1 and 14 |
 | `Dockerfile` | 6 |
 | `deploy/host/*` | 7 |
 | `deploy/terraform/*` | 8 (plan only; applying needs approval) |
@@ -87,6 +88,7 @@ What to verify:
   - Group members carry `group` and `scope`, and `report.csv` has `reviewed_as` filled in.
   - The CSV escapes `=HYPERLINK…` as `'=HYPERLINK…`.
   - `report.md` has one details section per group.
+  - Claude's own findings given in mixed severity order get the same `C…` ids in `report.json`, `report.csv`, `report.md` and `validate.open_items`, with C01 the most severe.
 
 ## 4. Grouping on real results (read-only)
 
@@ -199,6 +201,7 @@ What to verify:
 - **Seeding:** `strix-instructions.md` lists the findings with the untrusted-data warning, the live target and the operator instructions; `strix-findings.json` is the payload.
 - **Parsing:** `V001…` findings carry the PoC, fix, and the `F001`/`C01` ids from their text (try a dict-shaped and a `file:line` location, and a `=HYPERLINK…` title — the CSV must show `'=HYPERLINK…`).
 - **Coverage:** `validation.md` lists which sent findings Strix's findings reference.
+- **Re-validation guard:** patch `validate.checkout` to clone a local bare repo and pass `org/repo`. A branch `vulnscan/fix-<run>-V001` in the bare repo makes it exit 2, naming the branch, before strix runs. A branch for another run doesn't. A local folder skips the check.
 - **Errors:** missing `LLM_API_KEY` exits 2 *before* anything is cloned; a strix that exits 1 still writes partial reports and exits 2; garbage artifacts with exit 2 are an error, not "no findings"; a report with everything dismissed writes "nothing to validate" and skips Strix.
 - **Hygiene:** a local target is copied (Strix mounts targets writable) and the copy removed afterwards (`ls $VULNSCAN_HOME/work`).
 
@@ -224,6 +227,7 @@ What to verify:
 - **Guards (exit 2):** a public repo without `--dry-run`, no GitHub token, a local folder, no `validation.json`. A public repo with `--dry-run` runs. An empty `validation.json` writes "Nothing to fix" and makes no GitHub or Claude calls.
 - **`--dry-run`:** it makes no POST and pushes nothing. The clone under `work/` is removed afterwards.
 - **`--only`:** `--only v002` handles only V002 (lowercase works, one Claude call, and `fix.md` shows `only: V002`). Repeating it handles each finding named. An unknown ID exits 2 with no clone and no GitHub call.
+- **Merging:** `--only V001`, then `--only V002`: `fix.json` has both, each with its own `fixed_at`. A full re-run keeps V001's `pr opened` and link, not `skipped`. After changing V001's title in `validation.json` (a re-validation), the next run drops the old V001.
 
 ## 13. Fix stage dry run with real Claude (uses a little Claude quota, pushes nothing)
 
@@ -242,3 +246,23 @@ Check that `fix.md` says `committed (dry run)`, that `fix/V001.patch` is a small
 When you change the prompt, also add a committed-secret finding (`config/initializers/secret_token.rb`, "Hardcoded Rails secret_key_base"). The fix should not delete the secret: it should read `ENV["SECRET_KEY_BASE"]` with the current value as fallback, set `breaking: false`, and list rotation in `before_merging`. On 2026-11-04 both findings took 13 turns and cost $0.15 at API rates, and the SQL injection fix kept the existing behaviour: a parameterised `where`, not `current_user`.
 
 To see the PR body a dry run would post, render it with `fix._pr_body(finding, structured_output, run_name, commit)` from `fix/claude-<V id>.json`. The SQL injection's "Steps to reproduce" should be a `curl … "$BASE_URL/users/<id>"`, with placeholders for the session cookie, ending with the behaviour before and after the fix. The secret's should be numbered steps that name where the secret is, without printing any of it.
+
+## 14. Dashboard over fabricated runs (no quota, nothing on the instance)
+
+Make a scratch `VULNSCAN_HOME` with these runs:
+- one complete run, whose `report.json`, `validation.json` and `fix.json` follow the shapes in checks 10 and 12, with a `<script>` title, a `"`-breaking title and a `poc` you'd notice;
+- a run folder with no `report.json`;
+- one with a truncated `report.json`;
+- a label with a space.
+
+```bash
+VULNSCAN_HOME=$T .venv/bin/vulnscan dashboard --port 18080 &
+curl -s localhost:18080/ ; curl -s localhost:18080/run/<label>/<run>
+```
+
+What to verify:
+- **Content:** the funnel counts and the F → V → PR joins are right. Titles appear only escaped (no raw `<script>` or `<img`). The `poc` text appears nowhere. The only `href`s are `/` and https PR links.
+- **Requests:** `-H 'Host: evil.example'` gets 403. `--path-as-is /run/../../etc/passwd`, `/run/<label>/..%2F..` and `/run/<label>/<run>/validation.json` get 404. POST gets 501. Responses carry the CSP, `nosniff`, `no-referrer` and `no-store` headers.
+- **Bad runs:** an unfinished run shows "unfinished", and a truncated one shows "unreadable". Neither breaks the index.
+
+Then run the container with the `vulnscan-build` flags, using a test name, network and port, on an image built from your tree. Check that it serves the page and runs as uid 10001. Writes to the scans and root filesystem must fail, and `env` must hold no tokens. A container on `--network bridge` must not reach the dashboard's IP on port 8080, or the bridge gateway on the published port.

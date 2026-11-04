@@ -6,7 +6,7 @@ How the code works, from one scan's point of view, plus the container image, hos
 
 ```
 vulnscan/                  Python package (stdlib only, Python 3.9+)
-  cli.py                   argparse entry point: `vulnscan scan`, `vulnscan tools`; sets umask 077
+  cli.py                   argparse entry point: `scan`, `validate`, `fix`, `dashboard`, `tools`; sets umask 077
   scan.py                  orchestration: checkout → detect → run scanners → triage → reports
   repo.py                  parse org/repo or URL, enforce the org allowlist, shallow clone with token, cleanup
   detect.py                stack detection from marker files
@@ -16,6 +16,7 @@ vulnscan/                  Python package (stdlib only, Python 3.9+)
   validate.py              stage 2: seeds a scan's open findings into Strix (GLM via OpenRouter), collects its artifacts, writes validation reports
   fix.py                   stage 3: Claude fixes each validated finding on its own branch; vulnscan pushes it and opens a draft PR
   report.py                writes report.json, report.csv and report.md
+  dashboard.py             read-only web page joining every run's report.json, validation.json and fix.json
   config.py                paths, timeouts, batch size, scanner environment allowlist, logging
   tools/                   one module per scanner, all built on tools/base.py
 Dockerfile                 production image: every runtime and scanner pinned by version and SHA-256
@@ -160,7 +161,7 @@ Findings are turned into **items**: the units Claude reviews. Each item is a pai
 Stage 2, run with `vulnscan validate <repo>` after a scan. It re-checks the scan's **open findings** with Strix (https://github.com/usestrix/strix), whose agents run inside Strix's own Docker sandbox and only report a finding with a working proof-of-concept.
 
 1. **Find the run:** the stage-1 run folder is the latest with a `report.json` for that repo label (or `--run`). Its open findings — confirmed, needs review, not triaged, plus Claude's own `C…` findings, but not false positives or duplicates — are sorted by (final severity, category secret→code→config→dependency, file, line) and capped at `--max-validate` (default 100). With nothing to validate, reports are written saying so and Strix never runs.
-2. **Checkout:** the repo is cloned exactly as in stage 1 (org allowlist, token via `GIT_CONFIG_*`). If the new HEAD differs from the report's commit, a warning is logged. Strix mounts local targets **writable**, so a local folder is first copied to a throwaway directory under `work/`; our own clones are already throwaway.
+2. **Checkout:** the repo is cloned exactly as in stage 1 (org allowlist, token via `GIT_CONFIG_*`). If the new HEAD differs from the report's commit, a warning is logged. For a GitHub repo, `_fix_branches` then runs `git ls-remote --heads origin vulnscan/fix-<run>-*`. If `vulnscan fix` already pushed branches for this run, it raises `ValidateError` (exit 2) before Strix runs, because a re-validation renumbers `V…` and the branches and PRs are named after the old ids. Strix mounts local targets **writable**, so a local folder is first copied to a throwaway directory under `work/`; our own clones are already throwaway.
 3. **Seed Strix:** `strix -n --target <clone> [--target <url> …] --instruction-file <run>/strix-instructions.md --workspace-file <run>/strix-findings.json:findings.json --scan-mode <mode> --scope-mode full [--max-budget <USD>]`. The instructions tell Strix to validate each listed finding, to name the stage-1 id(s) it confirms, and to treat the finding texts as untrusted data; `--instruction` flags are appended as operator notes (e.g. credentials for a live target).
 4. **Environment:** Strix gets `STRIX_LLM` (`--model`, default `openrouter/z-ai/glm-5.3`), `LLM_API_KEY` (from `LLM_API_KEY` or `OPENROUTER_API_KEY`), `STRIX_TELEMETRY=0`, Docker and proxy variables — and nothing else. The GitHub token never reaches Strix. The run is stopped after `VULNSCAN_VALIDATE_TIMEOUT` (default 7200 s). Headless exit codes: 0 clean, 2 findings found (both fine), 1 fatal.
 5. **Artifacts:** Strix writes `strix_runs/<name>/` into the run folder's `strix/` scratch directory; the newest run is copied to `raw/strix/` and its output log kept at `strix/strix-output.log`. `vulnerabilities.json` is parsed first, falling back to `findings.sarif`; both are read defensively because the schema isn't documented. `run.json` supplies the status and `llm_usage.cost`. If Strix exited 2 but nothing parsed, that's an error, not "no findings".
@@ -182,13 +183,40 @@ Stage 3 is run with `vulnscan fix <repo>` after a validation. It opens one draft
    - **Commit:** `git add -A` and a commit with the `vulnscan <vulnscan@noreply.invalid>` identity. Every git call adds `-c core.hooksPath=/dev/null -c commit.gpgsign=false`. The commit is saved as `fix/<V id>.patch`.
    - **Push and PR:** unless `--dry-run`, vulnscan pushes `HEAD:refs/heads/<branch>` with `repo.git_env` (the token through `GIT_CONFIG_*`). It then calls `POST /repos/{owner}/{name}/pulls` with `draft: true` and the title `[vulnscan] <title>`, or `[vulnscan][breaking] <title>`. The body opens with a CAUTION banner if the fix is breaking, and a "Before merging" checklist from `before_merging`. It then has the finding, the stage-1 ids, the run and commit, Claude's summary, "Steps to reproduce" (`reproduce`), the review notes, and an "untested" warning. `reproduce` is a `curl` command against `$BASE_URL`, or numbered steps, ending with the behaviour before and after the fix. Hosts, credentials and secret values are placeholders. Strix's raw `poc` is never copied into the PR. API calls use `urllib` with the token in the `Authorization` header.
    - **Errors:** a git, Claude or API error marks that finding `failed`, and the loop continues.
-4. **Reports:** `fix.json` has the metadata (`base`, `commit`, `validation_commit`, `model`, `dry_run`, `cost_usd`) and one result per finding: `status`, `branch`, `pr_url` or `error`, and `detail`. `fix.md` shows the same as a table. If any finding failed, `FixError` is raised after the reports are written, so the exit code is 2.
+4. **Reports:** `fix.json` has the metadata (`base`, `commit`, `validation_commit`, `model`, `dry_run`, `cost_usd`) of the latest fix run, and one result per finding: `status`, `branch`, `pr_url` or `error`, `detail` and `fixed_at`. `fix.md` shows the same as a table. `_merge_earlier` keeps the results already in `fix.json`:
+   - It keeps them for findings this run didn't handle.
+   - It keeps them over this run's `skipped`, since the branch exists and the earlier result, such as its PR link, still applies.
+   - It drops an earlier result whose ID and title no longer match `validation.json`, which happens when the scan was re-validated.
+
+   If any finding in this run failed, `FixError` is raised after the reports are written, so the exit code is 2.
 
 The wrapper needs no special case for `fix`. It already passes `GITHUB_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`, and the container gets no Docker socket.
 
+## Dashboard (`dashboard.py`)
+
+`vulnscan dashboard [--host 127.0.0.1] [--port 8080]` runs a stdlib `ThreadingHTTPServer` over `$VULNSCAN_HOME/scans`. It's GET only and has two routes:
+- **`/`:** every `<label>/<run>` folder, newest first. `_summary` per run is cached by the three files' mtime and size, so unchanged runs aren't parsed again.
+- **`/run/<label>/<run>`:** one run. Both names must be existing folder entries. The path is never built from the URL, so `..` and encoded slashes get a 404.
+
+`_run_data` joins the stages:
+- **Open findings:** the stage-1 findings that aren't `false_positive` or `duplicate`, plus Claude's own. Claude's are numbered `C01…` in `report.json`'s order, as everywhere else. `report.py` sorts them by severity before writing.
+- **Strix status of each open finding:**
+  - the `V…` ids whose `validates` include it;
+  - `not validated` if it's in `coverage.not_referenced`;
+  - `not sent` if validation ran without it (beyond `--max-validate`);
+  - nothing if validation hasn't run.
+- **Fix status:** comes from `fix.json` results by `V…` id.
+- **Missing or half-written files:** a missing `report.json` shows "unfinished", and one that doesn't parse shows "unreadable".
+
+Safety:
+- **Untrusted content:** findings quote repo content, so every value goes through `html.escape`. Links are rendered only for `https://` URLs.
+- **Response headers:** `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; …`, `nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
+- **Host check:** a request whose `Host` isn't `localhost`, `127.0.0.1` or `::1` gets a 403, so DNS rebinding can't reach it.
+- **What it never shows:** Strix's `poc` text and raw files.
+
 ## Reports (`report.py`)
 
-- **`report.json`:** the scan metadata (`repo`, `commit`, `scanned_at`, `stacks`, `tools`, `triage`), plus `summary`, `findings` (each `Finding` as a dict, including `triage`) and `additional_findings`.
+- **`report.json`:** the scan metadata (`repo`, `commit`, `scanned_at`, `stacks`, `tools`, `triage`), plus `summary`, `findings` (each `Finding` as a dict, including `triage`) and `additional_findings`. `additional_findings` are sorted by severity before any file is written. Every file, `validate.py` and the dashboard number them `C01…` in that order, so an id always names the same finding.
 - **`report.csv`:** the columns in `CSV_COLUMNS` (described in the [README](../README.md#outputs)). Claude's own findings come first as `C01…`. Every value goes through `_csv_value`, which guards against formula injection.
 - **`report.md`:**
   - It starts with the scan details, tool status and summary.
@@ -233,7 +261,7 @@ To upgrade a tool, change its version and both checksums together; the build fai
 ## Host scripts (`deploy/host/`)
 
 `/usr/local/bin/vulnscan`, run as root on the instance:
-1. Source `/etc/vulnscan/config`.
+1. Source `/etc/vulnscan/config`. Refuse `dashboard` (exit 2) before reading any token: the dashboard has its own container.
 2. Read `$SSM_PREFIX/github-token` and `claude-token` with the instance role; for the `validate` subcommand also `$SSM_PREFIX/openrouter-token` (which must not still be the placeholder).
 3. Remove leftover containers labelled `vulnscan`.
 4. Start the scan detached:
@@ -256,8 +284,20 @@ Why the socket works for validate: the repo copy Strix tests lives in the run fo
 1. Read the optional `$SSM_PREFIX/source-token`. It's only needed if the vulnscan repo is private.
 2. Clone, or fetch and hard-reset, `VULNSCAN_SOURCE_REPO@VULNSCAN_SOURCE_REF` into `/opt/vulnscan-src`.
 3. `docker build --pull -t vulnscan:latest`.
-4. Install `deploy/host/vulnscan` to `/usr/local/bin`.
-5. Prune images and build cache.
+4. Install `deploy/host/vulnscan` to `/usr/local/bin`, and pre-pull Strix's sandbox image.
+5. Recreate the dashboard container on the new image:
+   ```
+   docker run -d --name vulnscan-dashboard --restart unless-stopped --init
+              --cap-drop ALL --security-opt no-new-privileges --read-only --memory 512m --pids-limit 64
+              --network vulnscan-dashboard -p 127.0.0.1:8080:8080
+              -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans:ro
+              vulnscan:latest dashboard --host 0.0.0.0 --port 8080
+   ```
+   - **No tokens:** it gets no `-e` at all, and has no AWS access (IMDS hop limit 1).
+   - **Network:** `vulnscan-dashboard` is a bridge network of its own, created if missing. Docker isolates bridges from each other, so containers on the default bridge can't reach it. That includes the Strix sandboxes that run scanned code.
+   - **Port:** it's published on the host's loopback only, and Session Manager port forwarding connects there.
+   - **Restarts:** Docker starts at boot, and `--restart unless-stopped` brings the container back after a Spot stop.
+6. Prune images and build cache.
 
 `/etc/vulnscan/config` is written at first boot and holds `AWS_REGION`, `SSM_PREFIX`, `VULNSCAN_GITHUB_ORG`, `VULNSCAN_SOURCE_REPO` and `VULNSCAN_SOURCE_REF`.
 

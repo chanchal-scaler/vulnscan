@@ -10,6 +10,12 @@
 set -euo pipefail
 . /etc/vulnscan/config
 
+# The dashboard is its own long-running container, started by vulnscan-build with no tokens.
+if [ "${1:-}" = "dashboard" ]; then
+  echo "[vulnscan] the dashboard already runs in its own container (vulnscan-build starts it): docs/operations.md" >&2
+  exit 2
+fi
+
 param() {
   aws ssm get-parameter --region "$AWS_REGION" --name "$SSM_PREFIX/$1" \
     --with-decryption --query Parameter.Value --output text

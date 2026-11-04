@@ -11,6 +11,7 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 - **Cost:** about $29 a month. The instance is about $23 at the current Spot price, disks $2, the public IPv4 address $3.65. The Claude subscription is separate; validation spends against the OpenRouter key, capped by `--budget` (default $25 a run).
 - **Stage 2 (validation):** the code, the image (Strix 1.7.0, sandbox 1.3.0) and the wrapper wiring are done, but nothing is on the instance yet: the owner pushes, `vulnscan-build` rebuilds, `terraform apply` adds the parameter, the key is set, and the first validation is run. None of that has happened.
 - **Stage 3 (`vulnscan fix`):** the code is done. It needs no image, wrapper, Terraform or token change, because it uses the existing GitHub PAT (`repo` scope) and Claude token. It reaches the instance with the next `vulnscan-build`, and it can only run after a validation has.
+- **Dashboard (`vulnscan dashboard`):** the code, the wrapper refusal and the `vulnscan-build` wiring are done. No Terraform, IAM or cost change. It reaches the instance with the next push and `vulnscan-build`, which starts the `vulnscan-dashboard` container. Not yet checked on the instance, including that port forwarding reaches it.
 
 ## Verified
 
@@ -38,6 +39,20 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
   - First real run on a private repo, 12 draft PRs: the push and PR flow worked, but several fixes would have broken deployments if merged as they were. The prompt was then tightened ([decisions.md](decisions.md)).
   - The tightened prompt was re-run as a dry run on OWASP/railsgoat. A SQL injection fix kept the existing behaviour, and a committed secret became an environment variable with the old value as fallback, with "rotate" and "set it everywhere" in `before_merging`.
   - PRs from the earlier run keep the old prompt's output. To regenerate one, close it, delete its branch and re-run `fix`.
+
+- **Dashboard (local, 2026-11-04):**
+  - Tested over fabricated run folders: a complete run, an unfinished one, a corrupt `report.json`, and a label with a space.
+  - Pages: the funnel and the F → V → PR joins are right, `<script>` and attribute-breaking titles come out escaped, no PoC appears, and the only links are https PR links.
+  - Requests: a non-localhost `Host` gets a 403, path traversal and raw-file paths get a 404, and POST gets a 501.
+  - Container, run with the `vulnscan-build` flags on Docker Desktop: uid 10001, read-only scans and root filesystem, no tokens, about 15 MB of memory. It's unreachable from a default-bridge container both directly and through the bridge gateway.
+- **`fix.json` merging (local, 2026-11-04):** tested with stand-ins against a local bare repo:
+  - `--only V001`, then `--only V002`, keeps both.
+  - A full re-run keeps V001's PR over `skipped`.
+  - After a re-validation, the stale V001 is dropped.
+
+- **Two fixes (local, 2026-11-05):**
+  - Claude's own findings in mixed order now get the same `C…` ids in `report.json`, `report.csv`, `report.md` and `validate.open_items`.
+  - With a stand-in Strix and a local bare repo, `validate` refuses when the run has `vulnscan/fix-<run>-*` branches, before Strix starts. It runs when there are none, or only another run's, and skips the check for a local folder.
 
 ## Scans run
 
@@ -67,6 +82,7 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 | Validation runs only where Docker and an OpenRouter key exist | The instance can't run it yet | Wiring is done (image, wrapper, parameter); first run pending |
 | Validate containers get the host Docker socket | A Strix sandbox manipulated through repo content could control the host daemon, i.e. the instance (~root); it could then read the three tokens via the instance role | Deliberate, documented exception ([decisions.md](decisions.md)): PoC validation needs sibling containers. Only the `validate` subcommand gets the socket; `--budget` and `VULNSCAN_VALIDATE_TIMEOUT` bound a run; the GitHub/Claude/OpenRouter tokens are the only secrets reachable, and the instance has no other AWS rights |
 | A validate run copies the repo into the run folder | The reports volume (5 GB) briefly holds a second copy of the repo; a 1.6 GB monolith needs ~3.2 GB free | Grow `data_volume_gb`, or validate big repos at a smaller `--ref`; the copy is removed when the run ends |
+| The dashboard shows PR links, not whether they're merged | Merged or closed PRs still show `pr opened` | Deliberate: live state would need the PAT in a long-running server. Open the link. |
 | Scanner env-var stripping isn't a hard boundary | A compromised scanner, running as the same user, could read the parent process's environment, which holds the tokens | The container limits what it can reach to those two tokens and the internet. Separating users would close it. |
 | Only the default branch's latest commit is scanned | Secrets removed in later commits, and other branches, are missed | Backlog: history scan |
 | No scheduling or alerting | New CVEs in existing lockfiles go unnoticed until someone scans | Backlog: nightly scans and alerts |

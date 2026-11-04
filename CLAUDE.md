@@ -7,6 +7,7 @@ vulnscan is a Python CLI that scans one GitHub repo for security issues:
 - `vulnscan validate` (stage 2) re-checks a scan's open findings with Strix, whose agents run in Strix's own Docker sandbox and report only findings with a working PoC; its LLM is GLM 5.3 via OpenRouter.
 - `vulnscan fix` (stage 3) has Claude Code fix each Strix-validated finding in a throwaway clone, then opens one draft PR per finding.
 - It writes `report.md`, `report.json` and `report.csv` (plus `validation.*` after stage 2 and `fix.*` after stage 3).
+- `vulnscan dashboard` serves a read-only web page that tracks each run's findings through the three stages. On the instance it runs in its own container, reached through Session Manager port forwarding.
 
 It runs as a proof of concept on one EC2 Spot instance in a staging AWS account, with each scan in a throwaway Docker container.
 
@@ -47,6 +48,7 @@ python3 -m venv .venv && .venv/bin/pip install -e .   # local setup (Python 3.9+
 .venv/bin/vulnscan scan OWASP/railsgoat --no-llm       # scanners only, on a public vulnerable app
 LLM_API_KEY=sk-or-… .venv/bin/vulnscan validate OWASP/railsgoat   # stage 2 (needs Docker + strix CLI)
 .venv/bin/vulnscan fix OWASP/railsgoat --dry-run       # stage 3; public repos only with --dry-run (no push, no PR)
+.venv/bin/vulnscan dashboard                           # read-only tracking page on http://localhost:8080
 docker build -t vulnscan:test .                        # the production image
 cd deploy/terraform && terraform fmt && terraform validate
 AWS_PROFILE=<profile> terraform plan                   # read-only; profile is in ENVIRONMENT.local.md
@@ -61,6 +63,11 @@ AWS_PROFILE=<profile> terraform plan                   # read-only; profile is i
 - **The GitHub token never reaches Strix.** `vulnscan validate` clones the repo itself (org allowlist, `GIT_CONFIG_*`) and passes a local directory; Strix's environment holds only `STRIX_LLM`, `LLM_API_KEY` and what it needs to reach Docker.
 - **GitHub tokens reach git only through `GIT_CONFIG_*` environment variables,** never in a URL, on a command line or in `.git/config`. The one other use is `fix.py`'s in-process GitHub API calls (`Authorization` header).
 - **Container hardening.** The container has no AWS access (IMDS hop limit 1). It runs with `--cap-drop ALL` and `no-new-privileges`, as uid 10001, with only the reports directory mounted. **Exception:** `vulnscan validate` containers also get the host Docker socket (with its group id), because Strix must start its sandbox containers on the host daemon. The wrapper gives it to no other subcommand.
+- **The dashboard is read-only and has no tokens.**
+  - Its container, started by `vulnscan-build`, mounts the scans read-only and has the usual hardening plus `--read-only`.
+  - It's on its own Docker network and published on the host's `127.0.0.1` only, never on an inbound rule.
+  - It refuses any `Host` but localhost, escapes every value, sends a CSP that allows no scripts, serves no raw files and never shows Strix's PoCs.
+  - The wrapper refuses to run it, because the wrapper would hand it the tokens.
 - **Instance role.** Session Manager plus `ssm:GetParameter` on `/vulnscan/*`, nothing else. Never attach `AmazonSSMManagedInstanceCore`: it can read every parameter in the account.
 - **Outbound traffic from the instance is TCP 443 only.** Everything a build or scan downloads must use HTTPS.
 - **Token parameters use `value_wo`,** so their values never enter Terraform state.

@@ -31,5 +31,18 @@ install -m 755 "$src/deploy/host/vulnscan" /usr/local/bin/vulnscan
 # Strix's pentest sandbox, for `vulnscan validate`. It runs on the host daemon, so it's
 # pulled here (not into the image); the wrapper builds STRIX_IMAGE from this tag.
 docker pull --quiet ghcr.io/usestrix/strix-sandbox:1.3.0
+
+# The dashboard (docs/operations.md): recreated on every build so it runs the new image.
+# Read-only scans mount, no tokens, published on the host's loopback only (reach it with
+# Session Manager port forwarding). Its own network keeps the containers on the default
+# bridge, such as Strix's sandbox running a scanned repo's code, from reaching it.
+docker network inspect vulnscan-dashboard >/dev/null 2>&1 || docker network create vulnscan-dashboard >/dev/null
+docker rm -f vulnscan-dashboard >/dev/null 2>&1 || true
+docker run -d --name vulnscan-dashboard --restart unless-stopped --init \
+  --cap-drop ALL --security-opt no-new-privileges --read-only \
+  --memory 512m --pids-limit 64 --network vulnscan-dashboard -p 127.0.0.1:8080:8080 \
+  -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans:ro \
+  vulnscan:latest dashboard --host 0.0.0.0 --port 8080 >/dev/null
+
 docker image prune -f
 docker builder prune -f

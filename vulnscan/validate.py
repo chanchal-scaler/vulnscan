@@ -28,7 +28,7 @@ from pathlib import Path
 from .config import SCANS_DIR, VALIDATE_BUDGET, VALIDATE_TIMEOUT, log
 from .findings import SEVERITIES, normalize_severity
 from .report import _cell, _csv_value
-from .repo import RepoError, checkout, git_head, parse_github
+from .repo import RepoError, checkout, git_env, git_head, parse_github
 
 DEFAULT_MODEL = "openrouter/z-ai/glm-5.3"  # Strix's recommended GLM-5.3 setup on OpenRouter
 CSV_COLUMNS = ["id", "severity", "title", "file", "line", "validates", "poc", "fix"]
@@ -62,6 +62,15 @@ def _resolve_run_dir(label, run_dir):
     if not runs:
         raise ValidateError(f"no finished scan for {label} under {base}: run 'vulnscan scan' first, or pass --run")
     return runs[-1]
+
+
+def _fix_branches(repo, run_name, env):
+    """Branches `vulnscan fix` already pushed for this run. They're named after its V ids."""
+    proc = subprocess.run(["git", "-C", str(repo), "ls-remote", "--heads", "origin", f"vulnscan/fix-{run_name}-*"],
+                          env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ValidateError(f"could not check the repo for fix branches: {proc.stderr.strip()[-300:]}")
+    return [line.split("refs/heads/", 1)[-1] for line in proc.stdout.splitlines() if line.strip()]
 
 
 def open_items(report, max_items):
@@ -380,7 +389,16 @@ def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="stand
         raise ValidateError("strix CLI not found on PATH: install it first (curl -sSL https://strix.ai/install | bash)")
     env = _strix_env(model)  # fail fast, before cloning, if the OpenRouter key is missing
 
+    parsed = None if Path(spec).expanduser().is_dir() else parse_github(spec)
     with checkout(spec, ref) as (repo, _label):
+        # Re-validating renumbers V001…, which would no longer match the fix branches and PRs
+        # named after them. fix only runs on GitHub repos, so only those can have such branches.
+        pushed = _fix_branches(repo, run_dir.name, git_env(parsed[0])) if parsed else []
+        if pushed:
+            raise ValidateError(
+                f"{run_dir.name} already has fix branches on GitHub ({', '.join(pushed[:3])}"
+                f"{', …' if len(pushed) > 3 else ''}): re-validating would renumber its V ids so they no longer match"
+                " those branches and PRs. Run a new scan and validate that, or delete those branches first")
         head = git_head(repo)
         meta["commit"] = head
         if report.get("commit") and head != report["commit"]:

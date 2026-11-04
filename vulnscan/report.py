@@ -63,7 +63,10 @@ def write_reports(run_dir, meta, findings, triage_result):
 
     Returns the markdown path.
     """
-    additional = (triage_result or {}).get("additional_findings", [])
+    # Sorted once, so C01… name the same finding in report.json, report.csv and report.md, and in validate.py
+    # and the dashboard, which number them in report.json's order.
+    additional = sorted((triage_result or {}).get("additional_findings", []),
+                        key=lambda a: SEVERITIES.index(a["severity"]))
     data = dict(meta, summary=(triage_result or {}).get("summary"),
                 findings=[f.to_dict() for f in findings], additional_findings=additional)
     (run_dir / "report.json").write_text(json.dumps(data, indent=2))
@@ -132,7 +135,7 @@ def write_reports(run_dir, meta, findings, triage_result):
 
     if additional:
         md += ["", f"## Additional issues found by Claude ({len(additional)})"]
-        for i, a in enumerate(sorted(additional, key=lambda a: SEVERITIES.index(a["severity"])), 1):
+        for i, a in enumerate(additional, 1):
             loc = f"{a['file']}:{a['line']}" if a.get("line") else a["file"]
             md += [
                 "", f"### C{i:02d} · {a['severity'].upper()} · {_cell(a['title'], 160)}",

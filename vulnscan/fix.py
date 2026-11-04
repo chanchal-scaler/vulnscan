@@ -220,12 +220,31 @@ def _fix_one(f, ctx):
             "detail": f"{flag}{pr.get('html_url')}"}
 
 
+def _merge_earlier(run_dir, results, titles):
+    """This run's results plus earlier fix runs' on the same scan, one per finding.
+
+    An earlier result is kept for a finding this run didn't handle, and over this run's
+    "skipped" (its branch exists, so the earlier result, e.g. the PR link, still applies).
+    It's dropped if validation.json no longer has that id with that title (re-validated).
+    """
+    try:
+        earlier = json.loads((run_dir / "fix.json").read_text())
+    except (OSError, ValueError):
+        return results
+    merged = {r.get("id"): dict({"fixed_at": earlier.get("fixed_at")}, **r)
+              for r in earlier.get("results") or [] if titles.get(r.get("id")) == r.get("title")}
+    for r in results:
+        if not (r["status"] == "skipped" and r["id"] in merged):
+            merged[r["id"]] = r
+    return sorted(merged.values(), key=lambda r: r["id"])
+
+
 def _write_reports(run_dir, meta, results):
     (run_dir / "fix.json").write_text(json.dumps(dict(meta, results=results), indent=2))
     md = [
         f"# Fix: {meta['repo']}",
         "",
-        f"- Fixed: {meta['fixed_at']}",
+        f"- Last fix run: {meta['fixed_at']} (results from earlier fix runs on this scan are kept)",
         f"- Validation run: {meta['run']} (validation.md)",
         f"- Base: `{meta['base'] or 'n/a'}` at `{meta['commit'] or 'n/a'}`",
         f"- Model: {meta['model'] or 'Claude Code default'} · dry run: {'yes' if meta['dry_run'] else 'no'}"
@@ -235,10 +254,10 @@ def _write_reports(run_dir, meta, results):
     if not results:
         md += ["", "Nothing to fix: validation reported no findings."]
     else:
-        md += ["", "| ID | Severity | Title | Status | PR or details |", "|" + "---|" * 5]
+        md += ["", "| ID | Severity | Title | Status | PR or details | Fix run |", "|" + "---|" * 6]
         for r in results:
             md.append(f"| {r['id']} | {r['severity']} | {_cell(r['title'])} | {r['status']} |"
-                      f" {_cell(r.get('detail') or r.get('error') or '', 200)} |")
+                      f" {_cell(r.get('detail') or r.get('error') or '', 200)} | {r.get('fixed_at') or ''} |")
     path = run_dir / "fix.md"
     path.write_text("\n".join(md) + "\n")
     return path
@@ -295,7 +314,8 @@ def fix(spec, run_dir=None, ref=None, model=None, dry_run=False, only=()):
                "model": model, "dry_run": dry_run, "cost": 0.0}
         results = []
         for f in findings:
-            r = {"id": f["id"], "severity": f["severity"], "title": f["title"], "location": _location(f)}
+            r = {"id": f["id"], "severity": f["severity"], "title": f["title"], "location": _location(f),
+                 "fixed_at": meta["fixed_at"]}
             try:
                 r.update(_fix_one(f, ctx))
             except (FixError, TriageError) as e:
@@ -305,7 +325,8 @@ def fix(spec, run_dir=None, ref=None, model=None, dry_run=False, only=()):
             results.append(r)
         meta["cost_usd"] = ctx["cost"]
 
-    path = _write_reports(run_dir, meta, results)
+    titles = {f["id"]: f["title"] for f in validation.get("findings") or []}
+    path = _write_reports(run_dir, meta, _merge_earlier(run_dir, results, titles))
     counts = Counter(r["status"] for r in results)
     if counts["failed"]:
         raise FixError(f"{counts['failed']} of {len(results)} fix(es) failed; details in {path}")

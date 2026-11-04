@@ -76,6 +76,7 @@ vulnscan validate scaler-hq/<repo> --url https://staging.example.com --instructi
 - `quick` mode takes minutes, `deep` can take hours; the run is stopped after `VULNSCAN_VALIDATE_TIMEOUT` (default 2 h) and the LLM spend is capped by `--budget`.
 - The wrapper gives **validate containers only** the Docker socket (Strix runs its sandbox on the host); a validate run also copies the repo into the run folder, which briefly doubles its disk use there.
 - Stage 1 doesn't need re-running: validate reads the newest `report.json` for that repo and clones the repo itself.
+- Re-validating the same scan is refused once `vulnscan fix` has pushed branches for it, because new `V…` ids wouldn't match them. Run a new scan instead.
 - Sessions still end after 60 minutes; validation is detached like a scan, so reattach with `docker logs -f <id>`.
 
 ## Fix validated findings (stage 3)
@@ -92,8 +93,31 @@ vulnscan fix scaler-hq/<repo> --run /var/lib/vulnscan/scans/scaler-hq__<repo>/<t
 - Read `fix.md` in the run folder. It lists each finding's status and PR link, or why there's no PR.
 - Every PR is a draft and **untested**. Claude can't run the repo's code or tests, so whoever owns the code reviews and tests it before merging.
 - Re-running is safe. Findings whose branch already exists are skipped. To retry one, close its PR, delete its branch on GitHub, and run with `--only <V id>`.
-- Each run rewrites `fix.md` and `fix.json` with only the findings it handled. The PRs themselves are on GitHub: `gh pr list --repo scaler-hq/<repo> --search "[vulnscan] in:title"`.
+- `fix.md` and `fix.json` keep earlier fix runs' results on the same scan, so `--only` and re-runs never lose a PR link. The PRs themselves are on GitHub: `gh pr list --repo scaler-hq/<repo> --search "[vulnscan] in:title"`.
 - Public repos are refused. It needs no image rebuild beyond `vulnscan-build` and no new token: it uses the same GitHub PAT, which has `repo` scope.
+
+## View the dashboard
+
+The dashboard is a read-only page that tracks every run: discovered, validated by Strix, and fix PRs opened. `vulnscan-build` runs it as the container `vulnscan-dashboard`. The container has no tokens, mounts the scans read-only, and is published only on the instance's `127.0.0.1:8080`, so there's no inbound rule and no public address. To open it, forward the port from your machine:
+
+```bash
+aws ssm start-session --target $I --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+# then open http://localhost:8080 in a browser; Ctrl-C ends the forwarding
+```
+
+- **Session limits:** the account's 60-minute cap applies here too. When the page stops loading, run the command again.
+- **Port in use:** if 8080 is busy on your machine, use another `localPortNumber` and open that port instead.
+- **Opening it by another name** (not `localhost` or `127.0.0.1`) gets a 403. That's the DNS-rebinding guard.
+- **Freshness:** the page reads the run folders on every request, so new results appear on reload.
+- **What it leaves out:** Strix's PoCs. They're in `validation.md` ([Read the results](#read-the-results)).
+
+On the instance:
+
+```bash
+docker ps --filter name=vulnscan-dashboard     # Up; restarts by itself after a Spot stop
+docker logs --tail 20 vulnscan-dashboard       # one line per request
+```
 
 ## Read the results
 
@@ -214,6 +238,7 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `validate`: `strix CLI not found on PATH` | The image predates stage 2 | Run `vulnscan-build`, then retry |
 | `validate`: `no finished scan for <repo>` | There's no run folder with a `report.json` for that repo | Run `vulnscan scan` first, or pass `--run <folder>` |
 | `validate`: `permission denied … /var/run/docker.sock` | The socket's group wasn't added, or Docker restarted and changed its group id | Re-run; if it persists, check `stat -c %g /var/run/docker.sock` on the host and the wrapper's `--group-add` |
+| `validate`: `… already has fix branches on GitHub` | `vulnscan fix` already opened branches or PRs for that scan's `V…` ids | Expected. Run `vulnscan scan` again and validate the new run. Or, if those PRs are abandoned, close them and delete their branches first. |
 | `validate` stops with a budget message | The `--max-budget` cap was reached; partial results are still written | Re-run with a higher `--budget`, or fewer items (`--max-validate`) |
 | `report.json` says the volume is filling during `validate` | The repo copy (`strix-target/`) briefly doubles the repo's size on the reports volume | Grow `data_volume_gb` ([deploy/README.md](../deploy/README.md#maintenance)), or validate big repos one `--ref` at a time |
 | `fix`: `no validated scan for <repo>` | No run folder has a `validation.json` | Run `vulnscan validate` first, or pass `--run <folder>` |
@@ -221,6 +246,9 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `fix`: `git push failed … 403` or `GitHub API POST …/pulls: HTTP 403/404` | The token can't push to or open PRs on that repo (read-only fine-grained token, missing SSO authorisation, or a push ruleset) | Check the token's scopes and SSO; for a ruleset (e.g. one restricting commit emails), ask the repo admins |
 | `fix`: `HTTP 422 … Draft pull requests are not supported` | Draft PRs need a paid plan on private repos | Not handled; the branch is pushed, so open the PR from it by hand |
 | `fix`: a finding is `skipped: branch already exists` | An earlier `fix` run already handled it | Expected. Delete the branch to retry |
+| Dashboard port forwarding: `Connection to destination port failed` | The `vulnscan-dashboard` container isn't running, e.g. the image predates the dashboard | On the instance: `docker ps -a --filter name=vulnscan-dashboard` and `docker logs vulnscan-dashboard`. `vulnscan-build` recreates it. |
+| Dashboard says `Forbidden: Open this page through localhost` | The browser reached it under another host name | Open `http://localhost:<port>` |
+| `vulnscan dashboard` on the instance exits 2 | The wrapper refuses it, because it would pass the tokens to a long-running server | Expected. The dashboard container is already running; see [View the dashboard](#view-the-dashboard). |
 | A scan folder has no `report.md` | The scan was interrupted (old foreground wrapper, a Spot stop, or `docker stop`) | Re-run. |
 
 ## Infrastructure changes (change)

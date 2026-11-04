@@ -3,6 +3,7 @@ import os
 import sys
 
 from .config import log
+from .dashboard import serve
 from .fix import FixError, fix
 from .installer import InstallError, ensure, find
 from .repo import RepoError
@@ -54,6 +55,15 @@ def _cmd_fix(args):
     summary = ", ".join(f"{n} {s}" for s, n in counts.items()) or "nothing to fix"
     print(f"\nFixes: {summary}")
     print(f"Report: {report}")
+    return 0
+
+
+def _cmd_dashboard(args):
+    try:
+        serve(args.host, args.port)
+    except OSError as e:
+        log(f"dashboard: can't listen on {args.host}:{args.port}: {e}")
+        return 2
     return 0
 
 
@@ -123,6 +133,13 @@ def main(argv=None):
     x.add_argument("--dry-run", action="store_true",
                    help="commit the fixes in a throwaway clone and save them as patches; push nothing, open no PRs")
     x.set_defaults(func=_cmd_fix)
+
+    d = sub.add_parser("dashboard", help="serve a read-only web page tracking every run through scan, validate and fix")
+    d.add_argument("--host", default="127.0.0.1",
+                   help="address to listen on (default: 127.0.0.1; the instance's container uses 0.0.0.0 behind a "
+                        "port published on the host's loopback only)")
+    d.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)")
+    d.set_defaults(func=_cmd_dashboard)
 
     args = parser.parse_args(argv)
     try:
