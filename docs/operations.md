@@ -85,12 +85,14 @@ After a validation, `vulnscan fix` opens one **draft** PR per finding in `valida
 ```bash
 vulnscan fix scaler-hq/<repo> --dry-run     # patches only, in <run>/fix/*.patch; nothing pushed
 vulnscan fix scaler-hq/<repo>               # the latest validated run; PRs against the default branch
+vulnscan fix scaler-hq/<repo> --only V003   # just one finding from validation.md (repeat --only for more)
 vulnscan fix scaler-hq/<repo> --run /var/lib/vulnscan/scans/scaler-hq__<repo>/<timestamp> --ref <branch>
 ```
 
 - Read `fix.md` in the run folder. It lists each finding's status and PR link, or why there's no PR.
 - Every PR is a draft and **untested**. Claude can't run the repo's code or tests, so whoever owns the code reviews and tests it before merging.
-- Re-running is safe. Findings whose branch already exists are skipped, so to retry one, delete its branch on GitHub (and close its PR) first.
+- Re-running is safe. Findings whose branch already exists are skipped. To retry one, close its PR, delete its branch on GitHub, and run with `--only <V id>`.
+- Each run rewrites `fix.md` and `fix.json` with only the findings it handled. The PRs themselves are on GitHub: `gh pr list --repo scaler-hq/<repo> --search "[vulnscan] in:title"`.
 - Public repos are refused. It needs no image rebuild beyond `vulnscan-build` and no new token: it uses the same GitHub PAT, which has `repo` scope.
 
 ## Read the results

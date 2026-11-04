@@ -219,10 +219,11 @@ Patch `fix.checkout` to clone a local bare repo (`file://…/origin.git`) instea
 What to verify:
 - **Statuses:** `pr opened`, `not fixed`, `failed`, `skipped`; the exit code is 2 because of the failure, and `fix.md` and `fix.json` are still written.
 - **Git:** only the fixed finding's branch is pushed. Its commit is authored by `vulnscan <vulnscan@noreply.invalid>`, and the "not fixed" finding's stray file is in no commit or patch.
-- **PR:** the POST is a draft against the default branch, titled `[vulnscan] …`. Its body has the stage-1 ids and the untested warning, and no PoC.
+- **PR:** the POST is a draft against the default branch, titled `[vulnscan] …` (or `[vulnscan][breaking] …`). Its body has the "Before merging" checklist, the stage-1 ids, "Steps to reproduce" and the untested warning. It doesn't have Strix's raw `poc` text.
 - **Claude:** it's called with `Read,Grep,Glob,Edit,Write`, with `<run>/fix/` as its working directory. The skipped finding never reaches Claude.
 - **Guards (exit 2):** a public repo without `--dry-run`, no GitHub token, a local folder, no `validation.json`. A public repo with `--dry-run` runs. An empty `validation.json` writes "Nothing to fix" and makes no GitHub or Claude calls.
 - **`--dry-run`:** it makes no POST and pushes nothing. The clone under `work/` is removed afterwards.
+- **`--only`:** `--only v002` handles only V002 (lowercase works, one Claude call, and `fix.md` shows `only: V002`). Repeating it handles each finding named. An unknown ID exits 2 with no clone and no GitHub call.
 
 ## 13. Fix stage dry run with real Claude (uses a little Claude quota, pushes nothing)
 
@@ -236,4 +237,8 @@ EOF
 VULNSCAN_HOME=$T .venv/bin/vulnscan fix OWASP/railsgoat --dry-run --model sonnet; echo "exit $?"   # expect 0
 ```
 
-Check that `fix.md` says `committed (dry run)`, that `fix/V001.patch` is a small, sensible diff, and that `fix/claude-V001.json` has no `permission_denials`. On 2026-11-04 this took 8 turns and cost $0.09 at API rates; Claude replaced the injectable `where` with `current_user`.
+Check that `fix.md` says `committed (dry run)`, that `fix/V001.patch` is a small, sensible diff, and that `fix/claude-V001.json` has no `permission_denials`.
+
+When you change the prompt, also add a committed-secret finding (`config/initializers/secret_token.rb`, "Hardcoded Rails secret_key_base"). The fix should not delete the secret: it should read `ENV["SECRET_KEY_BASE"]` with the current value as fallback, set `breaking: false`, and list rotation in `before_merging`. On 2026-11-04 both findings took 13 turns and cost $0.15 at API rates, and the SQL injection fix kept the existing behaviour: a parameterised `where`, not `current_user`.
+
+To see the PR body a dry run would post, render it with `fix._pr_body(finding, structured_output, run_name, commit)` from `fix/claude-<V id>.json`. The SQL injection's "Steps to reproduce" should be a `curl … "$BASE_URL/users/<id>"`, with placeholders for the session cookie, ending with the behaviour before and after the fix. The secret's should be numbered steps that name where the secret is, without printing any of it.

@@ -35,7 +35,9 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
   - Tested with a stand-in Claude and GitHub against a local bare repo: every status, the guards, idempotency, the commit identity, and that stray files from a "not fixed" attempt never get committed.
   - Dry-run end to end with real Claude on OWASP/railsgoat: a correct one-line fix and no permission denials.
   - Real restricted Claude was confirmed to edit files in `--add-dir` and to be refused a write to `.git/hooks`.
-  - Not yet run against a private repo, so no real push or PR has happened.
+  - First real run on a private repo, 12 draft PRs: the push and PR flow worked, but several fixes would have broken deployments if merged as they were. The prompt was then tightened ([decisions.md](decisions.md)).
+  - The tightened prompt was re-run as a dry run on OWASP/railsgoat. A SQL injection fix kept the existing behaviour, and a committed secret became an environment variable with the old value as fallback, with "rotate" and "set it everywhere" in `before_merging`.
+  - PRs from the earlier run keep the old prompt's output. To regenerate one, close it, delete its branch and re-run `fix`.
 
 ## Scans run
 

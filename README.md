@@ -102,7 +102,12 @@ Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https:
 `vulnscan fix` takes the latest run with a `validation.json` (or `--run`) and opens **one draft pull request per Strix-validated finding** (`V001…`):
 1. vulnscan clones the repo (org allowlist and token handling as in stage 1) and creates a branch `vulnscan/fix-<run>-<V id>` from the default branch, or from `--ref`, which must be a branch.
 2. Claude Code fixes that one finding. It runs restricted, as in triage, but with **Edit and Write added**. It still has no shell, web or MCP and no GitHub token, and `--restricted` refuses writes to `.git` and settings files. It's told to make the smallest change that removes the vulnerability, and to change nothing if it can't fix it safely.
-3. If Claude reports a fix and files changed, vulnscan commits as `vulnscan <vulnscan@noreply.invalid>` (git hooks never run), pushes the branch and opens a **draft** PR. The PR has Claude's summary, review notes and an "untested" warning. The PoC stays out of the PR; it remains in `validation.md`.
+3. If Claude reports a fix and files changed, vulnscan commits as `vulnscan <vulnscan@noreply.invalid>` (git hooks never run), pushes the branch and opens a **draft** PR. The PR has Claude's summary, **steps to reproduce**, review notes and an "untested" warning. The steps are written from the validated PoC and the code, and end with the behaviour before and after the fix. They're a `curl` command against `$BASE_URL` when the issue is reachable over HTTP, and numbered steps otherwise. Hosts, credentials and secret values are always placeholders. Strix's raw PoC stays in `validation.md`.
+
+Claude is told that a fix which breaks the app is worse than no fix:
+- It must check how the app is configured and deployed before touching anything that depends on that, and prefer backwards-compatible changes. For example, it reads a secret from the environment and keeps the current value as the fallback, rather than deleting the secret.
+- If the only fix can break callers or deployments, such as removing an endpoint or requiring auth, the PR is titled `[vulnscan][breaking] …` and opens with a warning.
+- Steps that must happen before merging, such as "set X in every environment" or "rotate the leaked key", appear as a checklist at the top of the PR.
 
 The rules it follows:
 - **One finding per branch.** A finding Claude can't fix gets no PR.
@@ -110,10 +115,12 @@ The rules it follows:
 - **The fixes are untested.** Claude can't run the repo's code or tests, which is why the PRs are drafts.
 - **Public repos are refused** unless you pass `--dry-run`, because a public branch or PR would disclose the vulnerability before the fix is merged. Fix those through a private security advisory instead.
 - **`--dry-run`** commits the fixes in the throwaway clone and saves them as patches in `fix/`. It pushes nothing and opens no PRs.
+- **`--only V003`** fixes just that finding; repeat it for several. An ID that isn't in the run's `validation.json` is an error (exit 2), caught before anything is cloned. Each run rewrites `fix.md` and `fix.json` with only the findings it handled.
 
 ```bash
 vulnscan fix your-org/repo                 # latest validated run, PRs against the default branch
 vulnscan fix your-org/repo --dry-run       # patches only, nothing pushed
+vulnscan fix your-org/repo --only V003     # just one validated finding (repeat --only for more)
 vulnscan fix your-org/repo --ref release-2026-11 --model opus --run ~/.vulnscan/scans/your-org__repo/20261104-114804
 ```
 
@@ -226,7 +233,7 @@ The scanner holds read access to your code and produces a list of its weaknesses
 - **It never runs the scanned repo's code.** No `bundle install` or `npm install`; scanners read source and lockfiles only.
 - **Scanners get a stripped-down environment.** `GITHUB_TOKEN*`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_*` and anything else not on the allowlist in `config.py` are withheld.
 - **Claude is read-only.** `claude -p --restricted --tools Read,Grep,Glob --strict-mcp-config`: no shell, no file writes, no web, no MCP servers. Its working directory is the scan's output folder, so the repo's `.claude/` settings and hooks never load. The prompt tells it to treat repo content as untrusted data. GitHub tokens are removed from its environment.
-- **Except in `vulnscan fix`,** where Claude may also Edit and Write, inside a throwaway clone and the run's `fix/` folder only. It still has no shell, web, MCP or token, and `--restricted` refuses writes to `.git` and settings files. vulnscan commits and pushes. Repo content could still steer the change Claude writes, which is why every PR is a draft that a person must review. The PRs never go to public repos and never include the PoC.
+- **Except in `vulnscan fix`,** where Claude may also Edit and Write, inside a throwaway clone and the run's `fix/` folder only. It still has no shell, web, MCP or token, and `--restricted` refuses writes to `.git` and settings files. vulnscan commits and pushes. Repo content could still steer the change Claude writes, which is why every PR is a draft that a person must review. The PRs never go to public repos. They include reproduction steps with placeholders, but never Strix's raw PoC.
 - **Secret values are redacted** by gitleaks before they reach disk.
 - **Files are private.** Everything is created readable by the current user only (umask 077).
 - **The org restriction** (`VULNSCAN_GITHUB_ORG`) stops it being pointed at arbitrary repos.
