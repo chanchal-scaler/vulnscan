@@ -7,3 +7,4 @@ dist/
 *.tfstate
 *.tfstate.*
 terraform.tfvars
+*.local.md

@@ -1,0 +1,72 @@
+# vulnscan: guide for agents
+
+vulnscan is a Python CLI that scans one GitHub repo for security issues:
+- It detects the repo's stacks and runs the scanners that fit (semgrep, osv-scanner, gitleaks, checkov, brakeman, bandit, gosec).
+- It merges their output into one finding format.
+- It uses Claude Code (headless, read-only) to verify the findings and look for issues scanners miss.
+- It writes `report.md`, `report.json` and `report.csv`.
+
+It runs as a proof of concept on one EC2 Spot instance in a staging AWS account, with each scan in a throwaway Docker container.
+
+## Read before changing anything
+
+| Doc | Contents |
+|---|---|
+| [README.md](README.md) | What it finds, Claude's role, outputs and CSV columns, CLI and settings, security model, limits |
+| [docs/architecture.md](docs/architecture.md) | Code layout, how a scan flows, the triage pipeline, report formats, image and Terraform contents |
+| [docs/decisions.md](docs/decisions.md) | Why things are the way they are, including approaches that were tried and rejected. Check here before "improving" something. |
+| [deploy/README.md](deploy/README.md) | What Terraform creates, first-time deployment, maintenance |
+| [docs/operations.md](docs/operations.md) | Runbook: connect, build, scan, read and copy results, health checks, troubleshooting |
+| [docs/testing.md](docs/testing.md) | How to test a change at each level before it reaches the instance |
+| [docs/status.md](docs/status.md) | What's deployed and verified, known issues, backlog |
+| `deploy/terraform/ENVIRONMENT.local.md` | Account, AWS profile and resource IDs for the live deployment. Gitignored, and only on the operator's machine. If it's missing, ask the owner. |
+
+## Working agreements (from the owner)
+
+- **Never commit or push.** The owner commits. When you finish, list the changed files.
+- **Ask before any infrastructure or data change:** `terraform apply`, AWS write calls, changes on the instance beyond running vulnscan, and edits to shared account settings. Read-only work needs no approval: `terraform plan`, `describe-*`/`get-*` calls, and read-only commands on the instance.
+- **Keep changes minimal.** Don't refactor or add features nobody asked for. Ask a clarifying question when a request is vague.
+- **The GitHub repo is public.** Never commit account IDs, resource IDs, tokens, `terraform.tfvars`, Terraform state, `*.local.md`, or scan results. Scan results describe vulnerabilities in private company code.
+
+## How a change reaches production
+
+1. Edit and test locally ([docs/testing.md](docs/testing.md)).
+2. The owner pushes to `main` on GitHub.
+3. On the instance, `vulnscan-build` clones `main`, rebuilds the Docker image, and reinstalls the `vulnscan` wrapper from `deploy/host/`.
+4. Terraform changes are planned and, after the owner approves, applied from the operator's machine. Its state is local there.
+
+The first-boot script (`user_data.sh.tftpl`) only runs when an instance is created. Changes to it need `terraform apply -replace=aws_instance.this`, which keeps the reports volume.
+
+## Common commands
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e .   # local setup (Python 3.9+, stdlib only)
+.venv/bin/python -m compileall -q vulnscan             # syntax check
+.venv/bin/vulnscan scan OWASP/railsgoat --no-llm       # scanners only, on a public vulnerable app
+docker build -t vulnscan:test .                        # the production image
+cd deploy/terraform && terraform fmt && terraform validate
+AWS_PROFILE=<profile> terraform plan                   # read-only; profile is in ENVIRONMENT.local.md
+```
+
+## Invariants: don't break these
+
+- **Scanners never get secrets.** They run with `config.scanner_env()`, an allowlist of environment variables.
+- **Claude runs restricted.** It runs as `claude -p --restricted --strict-mcp-config --tools Read,Grep,Glob`, with the run folder (not the repo) as its working directory, so the repo's `.claude/` settings and hooks never load. Every `GITHUB_TOKEN*` and `GH_TOKEN*` variable is removed from its environment.
+- **The scanned repo's code and dependencies are never run or installed.** No `bundle install` or `npm install`.
+- **GitHub tokens reach git only through `GIT_CONFIG_*` environment variables,** never in a URL, on a command line or in `.git/config`.
+- **Container hardening.** The container has no AWS access (IMDS hop limit 1). It runs with `--cap-drop ALL` and `no-new-privileges`, as uid 10001, with only the reports directory mounted.
+- **Instance role.** Session Manager plus `ssm:GetParameter` on `/vulnscan/*`, nothing else. Never attach `AmazonSSMManagedInstanceCore`: it can read every parameter in the account.
+- **Outbound traffic from the instance is TCP 443 only.** Everything a build or scan downloads must use HTTPS.
+- **Token parameters use `value_wo`,** so their values never enter Terraform state.
+- **Every binary in the Dockerfile is pinned** by version and SHA-256 for both amd64 and arm64.
+- **CSV values go through `report._csv_value`,** which guards against spreadsheet formula injection, because findings quote repo content.
+
+## Gotchas
+
+- The operator's shell is zsh, where `$VAR` holding several words isn't split. Use arrays, or run the snippet under `bash`.
+- Session Manager:
+  - Running commands on the instance non-interactively from a script needs a pseudo-terminal.
+  - The commands run without a shell, so wrap any shell syntax in `bash -c '...'`.
+  - The pattern is in [docs/operations.md](docs/operations.md#running-commands-on-the-instance-from-a-script).
+- Session Manager sessions end after 60 minutes, so scans run in detached containers. Never make the wrapper run scans in the foreground.
+- T3/T4g instances get no launch credits. In `standard` credit mode a new instance is throttled to 30% CPU, which is why it's `unlimited`.

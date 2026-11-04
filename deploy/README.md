@@ -1,6 +1,10 @@
 # Deploying vulnscan to EC2
 
-One Graviton instance (t4g.large) in its own subnet of an existing, otherwise empty VPC. Terraform creates the AWS side; the scanner runs in a fresh Docker container for every scan.
+One EC2 Spot instance (the live deployment uses t3.large) in its own subnet of an existing, otherwise empty VPC. Terraform creates the AWS side; the scanner runs in a fresh Docker container for every scan.
+
+- Day-to-day operation and troubleshooting: [docs/operations.md](../docs/operations.md).
+- Why it's built this way: [docs/decisions.md](../docs/decisions.md#deployment).
+- IDs and the AWS profile for the live deployment: `terraform/ENVIRONMENT.local.md`, which is gitignored and only on the operator's machine.
 
 ```
 deploy/
@@ -19,8 +23,15 @@ Dockerfile     the scanner image: all runtimes and scanners at pinned versions a
 | IAM role | Session Manager, plus `ssm:GetParameter` on `/vulnscan/*` only. If the instance is compromised, that's all it can do. It deliberately doesn't use `AmazonSSMManagedInstanceCore`, because that policy can read every parameter in the account. |
 | Metadata | IMDSv2 required, with a hop limit of 1, so containers can't get the instance role's credentials. |
 | Disks | Encrypted gp3. Reports are on a separate 5 GB volume mounted at `/var/lib/vulnscan`, so they survive the instance being replaced. |
+| Instance | `instance_type` (variable default `t4g.large`; the live deployment sets `t3.large` in `terraform.tfvars`, because t4g had no Spot capacity), Amazon Linux 2023 for the type's architecture.<br>**Spot:** a persistent request that **stops** the instance on interruption, keeping the disks, and restarts it when capacity returns.<br>**Unlimited CPU credits:** T-family instances get no launch credits, so `standard` mode throttles a new instance to 30% CPU. |
+| Parameters | `/vulnscan/github-token` and `/vulnscan/claude-token`, created as placeholders; you set the real values ([below](#add-the-tokens)) |
 
-Cost is about $55 a month at us-west-2 on-demand prices: $49.06 for the instance, $2.00 for 25 GB of gp3 (20 GB root, 5 GB reports) and $3.65 for the public IPv4 address, which is used only for outbound traffic. Stopping the instance between scans cuts the instance cost.
+Cost is about $29 a month in us-west-2:
+- **Instance:** about $23 at the current t3.large Spot price ($0.032/hr; on-demand would be $0.0832/hr).
+- **Disks:** $2.00 for 25 GB of gp3 (20 GB root, 5 GB reports).
+- **Public IPv4 address:** $3.65. It's used only for outbound traffic.
+
+Unlimited CPU credits only cost extra ($0.05 per vCPU-hour) if the 24-hour average CPU stays above 30%. Before changing `instance_type`, check Spot capacity with `aws ec2 get-spot-placement-scores`.
 
 ## Deploy
 
@@ -28,13 +39,15 @@ The instance builds the image from your GitHub repo, so push this project to a r
 
 ```bash
 cd deploy/terraform
-cp terraform.tfvars.example terraform.tfvars   # set region, vpc_id, subnet_cidr, github_org, source_repo
+cp terraform.tfvars.example terraform.tfvars   # set region, vpc_id, subnet_cidr, github_org, source_repo; optionally instance_type
 terraform init
 terraform plan
 terraform apply
 ```
 
-State is kept locally in `terraform.tfstate`; keep that file safe. It holds no secrets: the token parameters use the write-only `value_wo`, so their values are never stored in state.
+Requirements: Terraform 1.11 or later (for write-only arguments), and an existing VPC with an internet gateway attached.
+
+State is kept locally in `terraform.tfstate`, and it's the only copy, so back it up or move it to an S3 backend. It holds no secrets: the token parameters use the write-only `value_wo`, so their values are never stored in state.
 
 ## Add the tokens
 
@@ -71,7 +84,9 @@ Scans run in a detached container, so they keep going if the session ends. This 
 - **Ctrl-C** only stops following the output, not the scan.
 - **Big repos:** each scanner is stopped after 30 minutes by default. Raise the limit with `VULNSCAN_TOOL_TIMEOUT=3600 vulnscan scan ...`, and set `VULNSCAN_TRIAGE_TIMEOUT` the same way for Claude's review.
 
-Reports are written to `/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/`. The wrapper scans GitHub repos only; local paths on the instance aren't mounted into the container.
+Reports are written to `/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/` as `report.md`, `report.json` and `report.csv`. The wrapper scans GitHub repos only; local paths on the instance aren't mounted into the container.
+
+To read results, list the open critical and high findings, or copy a report to your machine, see [docs/operations.md](../docs/operations.md#read-the-results).
 
 ## Maintenance
 
@@ -81,3 +96,6 @@ Reports are written to `/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/`. The
 - **Disk space:** each scan's report takes about 1 MB, so the 5 GB reports disk holds thousands of scans. To grow a disk, raise `root_volume_gb` or `data_volume_gb` and apply; the instance keeps running. Then, on the instance, run `xfs_growfs /var/lib/vulnscan` for the reports disk, or `growpart /dev/nvme0n1 1 && xfs_growfs /` for the root disk.
 - **OS patches:** run `dnf upgrade --releasever=latest`, or run `terraform apply -replace=aws_instance.this` to move to the newest AMI. Replacing the instance keeps the reports volume. Run `vulnscan-build` afterwards, since the image lives on the root disk.
 - **Switching Claude to Bedrock later:** the container will then need AWS credentials. Either raise `http_put_response_hop_limit` to 2, or have the wrapper pass in short-lived credentials.
+- **Spot interruptions:** the instance stops and restarts by itself. Don't start it by hand. A scan running at that moment needs re-running.
+- **Changing `instance_type` or the Spot settings** replaces the instance (the reports volume is kept). If the new type has no Spot capacity, the apply retries for a long time; see [docs/operations.md](../docs/operations.md#troubleshooting).
+- **Troubleshooting:** see [docs/operations.md](../docs/operations.md#troubleshooting).

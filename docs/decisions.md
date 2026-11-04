@@ -1,0 +1,58 @@
+# Decisions
+
+Why vulnscan is built the way it is, including what was tried and rejected. Newest context first within each section. Dates are when the decision was made. Read the relevant entry before changing any of these things.
+
+## Background
+
+The project started (2026-11-03) after two incidents:
+1. **An SSRF in a third-party app's URL preview leaked AWS keys.** The attacker granted themselves admin and dumped all of Parameter Store, and rotating every credential took a long time.
+2. **Some systems were exploitable through a widely reported vulnerability** (HttpToShell), and the team learned about it from articles, not alerts.
+
+The owner asked for a tool that, given any GitHub repo in their orgs, picks and installs the right scanners, finds the important vulnerabilities, stores results on the machine, and uses a Claude Code token for the LLM part.
+
+The owner's choices:
+- a proof of concept;
+- only the org's own repos;
+- a CLI;
+- the language with the best security tooling that's easy to extend;
+- a Claude Code subscription token for now.
+
+Many of the infrastructure choices below come from incident 1: limit what a compromised scanner could reach.
+
+## Application
+
+| Decision | Why | Rejected |
+|---|---|---|
+| **Python, standard library only** (2026-11-03) | Most security tooling is Python or callable from it, and with no dependencies there's no supply-chain surface in the CLI itself. Python 3.9 is still supported for older hosts. | Go: fewer integrations and slower to extend. Third-party frameworks such as click: unnecessary. |
+| **Use existing scanners and normalise their output**: semgrep, osv-scanner, gitleaks, checkov, brakeman, bandit, gosec (2026-11-03) | Each is the standard tool for its area. Together they cover code, dependencies, secrets and infrastructure for the org's stacks (Rails, JS, Python, Go, Terraform). | Writing our own rules. Commercial SaaS: code would leave the account. |
+| **Never install or run the scanned repo's dependencies** (2026-11-03) | `bundle install`/`npm install` run arbitrary code from the repo. All scanners used work from source and lockfiles. | Running tests or builds, which some deeper analysers need. |
+| **Claude through the headless `claude -p` CLI, restricted and read-only** (2026-11-03) | The owner chose a Claude Code subscription token. The CLI's `--restricted`, `--tools Read,Grep,Glob`, `--strict-mcp-config` and a working directory outside the repo give read-only access that can't load the repo's own settings or hooks. `--json-schema` gives structured output. | The Agent SDK or API with an API key: not the owner's choice for now. Bedrock is the planned move ([status.md](status.md)) and needs no code change. |
+| **Group, prioritise and batch findings for Claude** (2026-11-04) | On a 7,700-finding monolith, the old "first 150 by severity" sent 141 dependency CVEs to Claude. CVSS rates them high, and `Gemfile.lock`/`yarn.lock` sort before `app/`. Committed private keys, SQL injection, `eval` on params and similar were all flagged by scanners but never reviewed. Now dependencies collapse per package version, noisy rules collapse to 5 samples, secrets and code come first, and up to 400 items are reviewed in batches of 100. On real data, everything on that list moved into batches 1–2. | Raising the 150 limit: one call can't take thousands of findings. Grouping brakeman: its warnings are location-specific (the SQL injection lines), so they're never grouped. |
+| **Only batch 1 does the open-ended code review** (2026-11-04) | Repeating it per batch costs time and quota and finds the same things. Later batches only give verdicts. | A separate deep-review mode is planned instead ([status.md](status.md)). |
+| **Dependencies grouped by package and version, not by lockfile** (2026-11-04) | One repo had 50 lockfiles. Merging cut critical/high dependency items from 312 to 237. | Keeping the lockfile in the key. |
+| **`report.csv`, with formula-injection escaping** (2026-11-04) | Requested for spreadsheets. Findings quote repo content, which is untrusted, so cells starting `=+-@` are prefixed with `'`. | — |
+| **Per-org tokens (`GITHUB_TOKEN_<ORG>`) supported, but production uses one classic PAT** (2026-11-04) | A fine-grained PAT can reach only one resource owner, so two orgs need two tokens; the code supports that. The owner chose a single classic PAT with `repo` scope, accepting that it also grants **write** access to every repo the user can reach. | Fine-grained per-org tokens (more secure; easy to switch back to). A GitHub App (best long-term option; needs code to mint installation tokens). |
+| **Shallow clone of one branch** (2026-11-03, re-tested 2026-11-04) | Fastest and smallest. Measured on discourse/discourse (27k files): 18 s. **Rejected after testing:** a blobless clone (`--filter=blob:none`) followed by `git checkout` with exclusions fetches **one file per request** (31 requests for 28 files in 30 s), so it would take hours. A blobless clone with sparse checkout batches correctly (1 request), but was no faster on that repo, and it leaves skip-worktree entries that `git ls-files` (and so semgrep) still lists. Skipping images on the biggest repo would save about 580 MB, but clone time there is about 3.5 minutes, which is acceptable. | Full clones (history isn't scanned anyway). Mirror caching between scans: possible later for nightly runs. |
+| **Per-scanner timeout of 30 minutes, adjustable per run** (2026-11-04) | One slow scanner shouldn't stall a scan forever, but large repos need longer for semgrep. `VULNSCAN_TOOL_TIMEOUT` and `VULNSCAN_TRIAGE_TIMEOUT` are passed through the wrapper. | — |
+
+## Deployment
+
+| Decision | Why | Rejected |
+|---|---|---|
+| **One standalone EC2 instance, managed by Terraform; standalone state** (2026-11-03) | The owner chose standalone EC2, with results stored on the instance. Terraform makes the IAM and network boundary reviewable and repeatable. | ECS/Fargate or CodeBuild: considered but not pursued, per the owner's choice. Joining an existing Terraform repo: the owner chose standalone. |
+| **Docker: a pinned image, and a fresh container per scan** (2026-11-03) | Bakes in every runtime (Python, Ruby, Go, Claude CLI), which also fixed gosec failing without Go. Every scanner is pinned with SHA-256 checksums for supply-chain control, and a scanner exploited by a malicious repo lands in a throwaway container. | Installing scanners on the host at scan time (unpinned, and not isolated). |
+| **Debian trixie base** (2026-11-03) | Brakeman 8.1 needs Ruby 3.2 or newer; bookworm only has 3.1. | Bookworm with Ruby built separately. |
+| **apt over HTTPS** (2026-11-04) | The first build on the instance failed because Debian's mirrors default to plain HTTP and the security group only allows 443. Switched the sources to `https://deb.debian.org`, keeping outbound 443-only. | Opening port 80. |
+| **The image is built on the instance from GitHub** (2026-11-03) | Simplest option: no registry and no CI. `vulnscan-build` clones `main` and builds. | ECR plus CI: worth it once there's CI. |
+| **Network: own subnet in an existing empty VPC, public IP, no NAT** (2026-11-03/04) | Cost: no $33/month NAT gateway; the public IPv4 address costs $3.65. The security group has no inbound rules, so the IP accepts nothing. The account was at its VPC and internet-gateway limit, so it reuses an existing VPC that's empty and owned by an abandoned stack (details in `ENVIRONMENT.local.md`). It adds its own subnet and route table and modifies nothing the stack owns. | A dedicated VPC (blocked by quota). An IPv6-only setup: github.com has no IPv6. Sharing the main staging VPC: a compromised scanner would share a network with 47 staging hosts. |
+| **IAM: a minimal custom policy, not `AmazonSSMManagedInstanceCore`** (2026-11-03) | The managed policy allows `ssm:GetParameter(s)` on `*`, so any instance with it can read every parameter in the account: exactly the dump from incident 1. The custom policy is AWS's minimal Session Manager policy plus `GetParameter` on `/vulnscan/*`. Verified on the instance: reading other parameters gets AccessDenied. | The managed policy. |
+| **IMDSv2 with hop limit 1; tokens fetched on the host** (2026-11-03) | Containers can't reach the instance role. The wrapper fetches the two tokens and passes them in by name. | Containers fetching their own tokens (would need hop limit 2 and would give scanners AWS credentials). |
+| **Tokens in Parameter Store, created by Terraform as placeholders through write-only `value_wo`** (2026-11-04) | The owner wanted Terraform to create them. With a plain `value`, every plan reads the parameter back, and the provider stores SecureString values **in plaintext in state**. `value_wo` is never stored; checked in the provider source, which sets `value` to null. The owner replaces the placeholder by hand. | Plain `value` with `ignore_changes` (still stored in state). Creating the parameters outside Terraform. |
+| **The vulnscan repo is public, so `source-token` is optional** (2026-11-04) | Public repos clone without a token, and `vulnscan-build` uses `source-token` only if it exists. | — |
+| **No SSH; Session Manager only** (2026-11-03) | No inbound ports and no keys to manage. Files are copied off by base64 over a non-interactive session ([operations.md](operations.md)). | An SSH key, or SCP over Session Manager (needs SSH keys). |
+| **Connect with `AWS-StartInteractiveCommand` running `sudo -i`** (2026-11-04) | The account's Session Manager preferences include a shell profile for the Rails app servers (`cd /var/app/current … rails c`), which spews errors here. Sessions that run a command skip that profile. | Changing the account-wide preference (shared; would affect other teams). |
+| **Scans run in detached containers** (2026-11-04) | The account caps sessions at 60 minutes. A foreground `docker run` died with the session, losing a 30-minute scan. Now the wrapper streams `docker logs -f`; the scan survives the session ending and Ctrl-C. | `nohup`/`systemd-run`: requires users to remember them. |
+| **Spot, persistent, stop on interruption** (2026-11-04) | About 55% cheaper (about $29/month instead of $55). Interruptions stop the instance, keeping both disks, and it restarts when capacity returns. A scan running at that moment has to be re-run. | On-demand. Spot that terminates on interruption (loses the root disk and image). |
+| **t3.large, not t4g.large** (2026-11-04) | t4g.large Spot in us-west-2a failed with `InsufficientInstanceCapacity`, scoring 1 of 10 in every zone. t3.large scored 3 in us-west-2a and has <5% monthly interruptions (t4g: 15–20%). The image builds for both architectures. Note: the variable's default is still `t4g.large`; `terraform.tfvars` sets `t3.large`. | m8g.large in us-west-2d (cheaper and rarely interrupted, but would mean moving the subnet and reports volume to another zone). |
+| **Unlimited CPU credits** (2026-11-04) | T3/T4g instances get **no launch credits**. In `standard` mode the image build used up the few earned credits, then the instance ran at its 30% baseline, with 61% steal time while semgrep crawled. Unlimited bills $0.05 per vCPU-hour only if the 24-hour average stays above 30%, which occasional scans don't reach. | `standard` (the original choice, made to avoid surprise charges). |
+| **Disks: 20 GB root, plus a separate 5 GB reports volume** (2026-11-03) | The image is about 2 GB; peak use during a rebuild is about 5 GB, plus the clone. A report is about 1 MB. A separate volume survives replacing the instance, which was verified when switching to Spot. Both can be grown without stopping the instance. | 40 GB + 20 GB (the first sizes, which were overkill). |
