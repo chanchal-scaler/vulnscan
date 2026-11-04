@@ -2,6 +2,11 @@
 # Run vulnscan in a throwaway container. Run as root, e.g. `vulnscan scan your-org/repo`.
 # The host fetches the tokens with the instance role. The container gets no AWS access
 # (IMDS hop limit 1), no Linux capabilities, and only the reports directory.
+#
+# `vulnscan validate` is the one exception: Strix must start its own sandbox containers
+# on the host's Docker daemon (that is where the scanned repo's code runs during PoC
+# validation), so validate containers also get the Docker socket. Nothing else changes
+# about the container, and only the validate subcommand gets it.
 set -euo pipefail
 . /etc/vulnscan/config
 
@@ -14,21 +19,39 @@ GITHUB_TOKEN=$(param github-token)
 CLAUDE_CODE_OAUTH_TOKEN=$(param claude-token)
 export GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN VULNSCAN_GITHUB_ORG
 
+# Stage 2 only: the OpenRouter key for the validation model (GLM 5.3 via Strix).
+validate=${1:-}
+if [ "$validate" = "validate" ]; then
+  LLM_API_KEY=$(param openrouter-token)
+  if [ "$LLM_API_KEY" = "todo update me" ]; then
+    echo "[vulnscan] $SSM_PREFIX/openrouter-token is still the placeholder; set it first (deploy/README.md)" >&2
+    exit 2
+  fi
+  export LLM_API_KEY
+fi
+
 # Remove containers left by earlier scans whose session ended before they finished.
 docker container prune -f --filter label=vulnscan >/dev/null
 
 # Detached, so the scan keeps running if the Session Manager session ends (the account
 # caps sessions at 60 minutes); this script just streams its output.
-# -e NAME without a value copies it from this environment, keeping tokens off the command
+# -e NAME without a value copies the host's value, keeping tokens off the command
 # line; the timeouts are only passed when set, e.g. VULNSCAN_TOOL_TIMEOUT=3600 vulnscan scan ...
 # --memory leaves ~2 GB for the host on an 8 GB instance.
-cid=$(docker run -d --init --label vulnscan \
+run_args=(-d --init --label vulnscan \
   --cap-drop ALL --security-opt no-new-privileges \
   --memory 6g --pids-limit 1024 \
   -e GITHUB_TOKEN -e CLAUDE_CODE_OAUTH_TOKEN -e VULNSCAN_GITHUB_ORG \
-  -e VULNSCAN_TOOL_TIMEOUT -e VULNSCAN_TRIAGE_TIMEOUT \
-  -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans \
-  vulnscan:latest "$@")
+  -e VULNSCAN_TOOL_TIMEOUT -e VULNSCAN_TRIAGE_TIMEOUT -e VULNSCAN_VALIDATE_TIMEOUT \
+  -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans)
+if [ "$validate" = "validate" ]; then
+  # Strix's sandbox containers are siblings on the host daemon, so it needs the socket:
+  # the socket's group id is added for this run only. validate copies the repo into the
+  # scans folder (mounted on both sides), because the sandbox mounts it from the host.
+  run_args+=(-e LLM_API_KEY --group-add "$(stat -c %g /var/run/docker.sock)"
+    -v /var/run/docker.sock:/var/run/docker.sock)
+fi
+cid=$(docker run "${run_args[@]}" vulnscan:latest "$@")
 id=${cid:0:12}
 echo "[vulnscan] running in container $id; it keeps going if this session ends (reattach: docker logs -f $id)" >&2
 trap 'echo >&2; echo "[vulnscan] stopped following; the scan continues (reattach: docker logs -f $id)" >&2; exit 130' INT

@@ -7,8 +7,9 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 - **Where:** one t3.large Spot instance (x86_64, Amazon Linux 2023) in the staging AWS account, us-west-2a, in its own subnet of a reused, otherwise empty VPC. Created by `deploy/terraform`; state is on the operator's machine.
 - **What's running:** the image is built on the instance from `main` of the public GitHub repo, by `vulnscan-build`.
 - **What it scans:** repos in two GitHub orgs (`github_org` in `terraform.tfvars`).
-- **Tokens:** one classic GitHub PAT and one Claude Code `setup-token`, both in Parameter Store under `/vulnscan/`.
-- **Cost:** about $29 a month. The instance is about $23 at the current Spot price, disks $2, the public IPv4 address $3.65. The Claude subscription is separate.
+- **Tokens:** one classic GitHub PAT and one Claude Code `setup-token`, both in Parameter Store under `/vulnscan/`. Stage 2 adds `/vulnscan/openrouter-token` (an OpenRouter key for Strix + GLM 5.3): created by the next `terraform apply` and set by hand.
+- **Cost:** about $29 a month. The instance is about $23 at the current Spot price, disks $2, the public IPv4 address $3.65. The Claude subscription is separate; validation spends against the OpenRouter key, capped by `--budget` (default $25 a run).
+- **Stage 2 (validation):** the code, the image (Strix 1.7.0, sandbox 1.3.0) and the wrapper wiring are done, but nothing is on the instance yet: the owner pushes, `vulnscan-build` rebuilds, `terraform apply` adds the parameter, the key is set, and the first validation is run. None of that has happened.
 
 ## Verified
 
@@ -27,6 +28,7 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
   - End to end with real Claude: 3 batches, every item got a verdict, no permission denials.
   - Replayed over a real 7,751-finding scan: every critical issue that a manual review had found moved into batches 1–2. Under the old triage none of them were reviewed.
 - **`report.csv`:** written, with formula escaping checked.
+- **Validation stage (local):** unit-tested with a stand-in Strix — selection and ordering of open findings, seeding files, parsing of `vulnerabilities.json` (both location shapes) with SARIF fallback, PoC/fix/id extraction, coverage lists, CSV formula escaping, the nothing-to-validate path, and the failure paths (missing key, exit 1, unparseable artifacts). Not yet run with real Strix or real OpenRouter credits.
 
 ## Scans run
 
@@ -48,6 +50,11 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 | Terraform state exists only on the operator's machine | If that machine is lost, the deployment can only be managed by hand | Back up, or move to an S3 backend with locking |
 | A single classic GitHub PAT has write access to every repo its user can reach | If leaked, it allows pushing to org repos | Fine-grained per-org tokens (already supported) or a GitHub App |
 | Claude runs on one person's subscription token | Usage limits are shared with that person's own use, and the token stops working if they leave | Switch to Bedrock (the instance role) or an API key; no code change needed |
+| `vulnerabilities.json` has no documented schema | A Strix release could change field names and validation reports would come out empty | Parsed defensively with a SARIF fallback, and exit 2 with nothing parsed is an error, not "no findings"; raw artifacts are always kept under `raw/strix/` for a fix |
+| Strix's findings are matched back to stage 1 by the ids it names in its text | Coverage lists can undercount (a finding validated but not labelled stays "not referenced") | The instruction file asks Strix to name ids; treat the coverage list as best effort |
+| Validation runs only where Docker and an OpenRouter key exist | The instance can't run it yet | Wiring is done (image, wrapper, parameter); first run pending |
+| Validate containers get the host Docker socket | A Strix sandbox manipulated through repo content could control the host daemon, i.e. the instance (~root); it could then read the three tokens via the instance role | Deliberate, documented exception ([decisions.md](decisions.md)): PoC validation needs sibling containers. Only the `validate` subcommand gets the socket; `--budget` and `VULNSCAN_VALIDATE_TIMEOUT` bound a run; the GitHub/Claude/OpenRouter tokens are the only secrets reachable, and the instance has no other AWS rights |
+| A validate run copies the repo into the run folder | The reports volume (5 GB) briefly holds a second copy of the repo; a 1.6 GB monolith needs ~3.2 GB free | Grow `data_volume_gb`, or validate big repos at a smaller `--ref`; the copy is removed when the run ends |
 | Scanner env-var stripping isn't a hard boundary | A compromised scanner, running as the same user, could read the parent process's environment, which holds the tokens | The container limits what it can reach to those two tokens and the internet. Separating users would close it. |
 | Only the default branch's latest commit is scanned | Secrets removed in later commits, and other branches, are missed | Backlog: history scan |
 | No scheduling or alerting | New CVEs in existing lockfiles go unnoticed until someone scans | Backlog: nightly scans and alerts |
@@ -55,15 +62,19 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 ## Backlog (suggested order)
 
 1. **Re-scan the largest repo with the new triage**, and agree with the owner how results are read and acted on.
-2. **Nightly scans with alerts:**
+2. **Bring stage 2 to the instance and run it once, for real:**
+   - the owner pushes, then on the instance `vulnscan-build` (rebuilds the image with Strix, pre-pulls the sandbox, installs the wrapper);
+   - `terraform apply` from the operator machine (adds `/vulnscan/openrouter-token` as a placeholder — no other change, no instance replacement), then set the OpenRouter key by hand ([deploy/README.md](../deploy/README.md#add-the-tokens));
+   - run one small validation — e.g. a repo with a modest stage-1 scan, `--scan-mode quick --budget 5` — and review `validation.md` before pointing it at anything bigger. The Strix sandbox image is multi-GB, so the first `vulnscan-build` is slower than usual.
+3. **Nightly scans with alerts:**
    - a systemd timer on the instance runs `vulnscan scan` for a list of repos;
    - it compares each run with the previous `report.json`;
    - it posts new confirmed critical/high findings to Slack.
    This is what would have caught HttpToShell-style exposures. Needs a webhook and approval.
-3. **A `--deep-review` mode:** after triage, split the app by entry points (e.g. one Claude call per controller directory), each with a stack-specific checklist. For Rails: authorization in every action, unscoped `find` (IDOR), strong params, `send_file`/redirects, Ransack, outbound HTTP (SSRF). This trades time and quota for coverage of issues scanners can't see.
-4. **Prompt fix for unused dependencies** (see Known issues).
-5. **Terraform state to S3,** with DynamoDB locking or S3 native locking.
-6. **An optional full-history secret scan** (`gitleaks git` on a full clone).
-7. **Move Claude to Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`). The container would then need AWS credentials: raise the hop limit to 2, or have the wrapper pass in short-lived credentials.
-8. **Fine-grained per-org tokens or a GitHub App** instead of the classic PAT.
-9. **An automated test suite,** turning [testing.md](testing.md) checks 3 and 7 into scripts.
+4. **A `--deep-review` mode:** after triage, split the app by entry points (e.g. one Claude call per controller directory), each with a stack-specific checklist. For Rails: authorization in every action, unscoped `find` (IDOR), strong params, `send_file`/redirects, Ransack, outbound HTTP (SSRF). This trades time and quota for coverage of issues scanners can't see.
+5. **Prompt fix for unused dependencies** (see Known issues).
+6. **Terraform state to S3,** with DynamoDB locking or S3 native locking.
+7. **An optional full-history secret scan** (`gitleaks git` on a full clone).
+8. **Move Claude to Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`). The container would then need AWS credentials: raise the hop limit to 2, or have the wrapper pass in short-lived credentials.
+9. **Fine-grained per-org tokens or a GitHub App** instead of the classic PAT.
+10. **An automated test suite,** turning [testing.md](testing.md) checks 3, 7 and 10 into scripts.

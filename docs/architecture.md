@@ -13,6 +13,7 @@ vulnscan/                  Python package (stdlib only, Python 3.9+)
   installer.py             finds scanners on PATH or installs them (pip venv, gem, GitHub release with checksum)
   findings.py              Finding dataclass, severity normalisation, sort order
   triage.py                groups findings into items, batches them, runs headless Claude, maps verdicts back
+  validate.py              stage 2: seeds a scan's open findings into Strix (GLM via OpenRouter), collects its artifacts, writes validation reports
   report.py                writes report.json, report.csv and report.md
   config.py                paths, timeouts, batch size, scanner environment allowlist, logging
   tools/                   one module per scanner, all built on tools/base.py
@@ -153,6 +154,19 @@ Findings are turned into **items**: the units Claude reviews. Each item is a pai
   - `cost_usd`: summed `total_cost_usd`. This is the API-rate figure; with a subscription token it's not billed.
   - `items`, `items_total`, `findings_covered`, `batches`, `errors`
 
+## Validation stage (`validate.py`)
+
+Stage 2, run with `vulnscan validate <repo>` after a scan. It re-checks the scan's **open findings** with Strix (https://github.com/usestrix/strix), whose agents run inside Strix's own Docker sandbox and only report a finding with a working proof-of-concept.
+
+1. **Find the run:** the stage-1 run folder is the latest with a `report.json` for that repo label (or `--run`). Its open findings — confirmed, needs review, not triaged, plus Claude's own `C…` findings, but not false positives or duplicates — are sorted by (final severity, category secret→code→config→dependency, file, line) and capped at `--max-validate` (default 100). With nothing to validate, reports are written saying so and Strix never runs.
+2. **Checkout:** the repo is cloned exactly as in stage 1 (org allowlist, token via `GIT_CONFIG_*`). If the new HEAD differs from the report's commit, a warning is logged. Strix mounts local targets **writable**, so a local folder is first copied to a throwaway directory under `work/`; our own clones are already throwaway.
+3. **Seed Strix:** `strix -n --target <clone> [--target <url> …] --instruction-file <run>/strix-instructions.md --workspace-file <run>/strix-findings.json:findings.json --scan-mode <mode> --scope-mode full [--max-budget <USD>]`. The instructions tell Strix to validate each listed finding, to name the stage-1 id(s) it confirms, and to treat the finding texts as untrusted data; `--instruction` flags are appended as operator notes (e.g. credentials for a live target).
+4. **Environment:** Strix gets `STRIX_LLM` (`--model`, default `openrouter/z-ai/glm-5.3`), `LLM_API_KEY` (from `LLM_API_KEY` or `OPENROUTER_API_KEY`), `STRIX_TELEMETRY=0`, Docker and proxy variables — and nothing else. The GitHub token never reaches Strix. The run is stopped after `VULNSCAN_VALIDATE_TIMEOUT` (default 7200 s). Headless exit codes: 0 clean, 2 findings found (both fine), 1 fatal.
+5. **Artifacts:** Strix writes `strix_runs/<name>/` into the run folder's `strix/` scratch directory; the newest run is copied to `raw/strix/` and its output log kept at `strix/strix-output.log`. `vulnerabilities.json` is parsed first, falling back to `findings.sarif`; both are read defensively because the schema isn't documented. `run.json` supplies the status and `llm_usage.cost`. If Strix exited 2 but nothing parsed, that's an error, not "no findings".
+6. **Reports:** findings are normalised (severity, title, PoC, fix, location), numbered `V001…`, and the stage-1 ids they reference (`F\d{3}`, `C\d{2}`) are extracted from their text into `validates`. `validation.md`, `validation.json` and `validation.csv` are written into the stage-1 run folder, with a best-effort coverage section listing what was and wasn't referenced. Values pass through `report._csv_value` like stage 1.
+
+On the instance, the repo copy Strix tests (`strix-target/`) is placed inside the run folder, not under `work/`: the run folder sits on the scans volume, mounted at the same path on the host and in the vulnscan container, so the host's Docker daemon — which Strix asks to mount the target into its sandbox — can see it. The copy is removed when the run finishes.
+
 ## Reports (`report.py`)
 
 - **`report.json`:** the scan metadata (`repo`, `commit`, `scanned_at`, `stacks`, `tools`, `triage`), plus `summary`, `findings` (each `Finding` as a dict, including `triage`) and `additional_findings`.
@@ -186,8 +200,9 @@ Findings are turned into **items**: the units Claude reviews. Each item is a pai
   | gitleaks | 8.30.1 |
   | gosec | 2.30.0 |
 
-- **Python tools,** pinned, each in its own virtualenv under `/opt/tools`: semgrep 1.183.0, checkov 3.4.3, bandit 1.9.4.
+- **Python tools,** pinned, each in its own virtualenv under `/opt/tools`: semgrep 1.183.0, checkov 3.4.3, bandit 1.9.4, and strix-agent 1.7.0 (stage 2; console script `strix`).
 - **Ruby:** brakeman 8.1.0 (gem).
+- **Strix's pentest sandbox** is not in the image: it runs as sibling containers on the **host's** Docker daemon, started by Strix at validate time. Its tag is pinned through `STRIX_IMAGE` (currently `ghcr.io/usestrix/strix-sandbox:1.3.0`) and pre-pulled by `vulnscan-build`.
 - **vulnscan** is installed into `/opt/vulnscan` from `pyproject.toml` and `vulnscan/`. `.dockerignore` excludes `deploy/`, `.git` and `.venv`.
 - **User:** `scanner` (uid 10001), with `/var/lib/vulnscan` owned by it.
 - **Environment:** `PATH` includes `/usr/local/go/bin`, `VULNSCAN_HOME=/var/lib/vulnscan`, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no auto-updater, no telemetry).
@@ -199,20 +214,23 @@ To upgrade a tool, change its version and both checksums together; the build fai
 
 `/usr/local/bin/vulnscan`, run as root on the instance:
 1. Source `/etc/vulnscan/config`.
-2. Read `$SSM_PREFIX/github-token` and `claude-token` with the instance role.
+2. Read `$SSM_PREFIX/github-token` and `claude-token` with the instance role; for the `validate` subcommand also `$SSM_PREFIX/openrouter-token` (which must not still be the placeholder).
 3. Remove leftover containers labelled `vulnscan`.
 4. Start the scan detached:
    ```
    docker run -d --init --label vulnscan --cap-drop ALL --security-opt no-new-privileges
               --memory 6g --pids-limit 1024
               -e GITHUB_TOKEN -e CLAUDE_CODE_OAUTH_TOKEN -e VULNSCAN_GITHUB_ORG
-              -e VULNSCAN_TOOL_TIMEOUT -e VULNSCAN_TRIAGE_TIMEOUT
+              -e VULNSCAN_TOOL_TIMEOUT -e VULNSCAN_TRIAGE_TIMEOUT -e VULNSCAN_VALIDATE_TIMEOUT
+              [-e LLM_API_KEY --group-add <docker gid> -v /var/run/docker.sock:/var/run/docker.sock]
               -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans vulnscan:latest "$@"
    ```
-   `-e NAME` without a value copies the host's value, so tokens never appear on a command line.
+   `-e NAME` without a value copies the host's value, so tokens never appear on a command line. The bracketed options are added **only for `vulnscan validate`**: Strix starts its sandbox containers on the host daemon, so the container needs the socket (with its group id added). This is the one deliberate exception to the hardened container; `scan` runs never get it.
 5. Print the container ID and follow `docker logs -f`.
    - Ctrl-C prints how to reattach and exits with 130; the scan continues.
    - When the container finishes, it removes it and exits with the container's exit code.
+
+Why the socket works for validate: the repo copy Strix tests lives in the run folder under `/var/lib/vulnscan/scans`, which is mounted at the same path on the host and in the container, so the host daemon can mount it into Strix's sandbox.
 
 `/usr/local/bin/vulnscan-build`, run as root:
 1. Read the optional `$SSM_PREFIX/source-token`. It's only needed if the vulnscan repo is private.

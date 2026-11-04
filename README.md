@@ -4,7 +4,8 @@ Give it a GitHub repo, or a local folder, and it finds security problems. It:
 - works out the stacks the repo uses;
 - runs the security scanners that fit;
 - merges their results;
-- uses Claude Code to check the findings against the actual code and look for issues scanners miss.
+- uses Claude Code to check the findings against the actual code and look for issues scanners miss;
+- can then validate the open findings with Strix, an agentic pentesting harness powered by GLM 5.3 via OpenRouter, which tries to prove each issue with a working PoC ([Validation](#validation-stage-2)).
 
 It writes a Markdown report, JSON and CSV.
 
@@ -76,6 +77,25 @@ Findings are grouped and prioritised first, so the important ones are reviewed e
 
 Claude never runs code, never tests the live app, and its results can differ between runs.
 
+## Validation (stage 2)
+
+Detection is only the first stage. `vulnscan validate` re-checks a finished scan's **open findings** (confirmed, needs review and not triaged — not Claude's false positives or duplicates) with [Strix](https://github.com/usestrix/strix), an open-source agentic pentesting harness. Strix runs inside its own Docker sandbox, where it reads the code, stands the app up and probes it, reporting only what it can validate with a working proof-of-concept. Its LLM is GLM 5.3 via OpenRouter.
+
+- **Seeding:** the open findings from the scan's `report.json` become an instruction file and a workspace file, so Strix validates *your* detected issues (worst first, capped by `--max-validate`) instead of re-scanning from scratch.
+- **Targets:** the repo is cloned by vulnscan itself and passed to Strix as a local directory, so the GitHub token never reaches Strix or its sandbox. `--url` adds a live target (e.g. the staging deployment) — only systems you are authorised to test.
+- **Model:** `--model`, or `STRIX_LLM`, defaults to `openrouter/z-ai/glm-5.3`; the OpenRouter key goes in `LLM_API_KEY` (or `OPENROUTER_API_KEY`). Strix only reports a finding it could actually reproduce.
+- **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
+- **On the instance:** it runs like a scan. The wrapper gives **validate containers only** the Docker socket (Strix starts its pentest sandbox on the host daemon — the one deliberate exception to the hardened container), reads the OpenRouter key from Parameter Store, and refuses to run while it's still the placeholder. The repo copy Strix tests is placed in the run folder, on the path mounted on both sides.
+
+```bash
+vulnscan validate your-org/repo                          # latest scan, repo + GLM 5.3
+vulnscan validate your-org/repo --url https://staging.example.com
+vulnscan validate your-org/repo --scan-mode deep --max-validate 200
+vulnscan validate your-org/repo --instruction "login: user/pass" --budget 10
+```
+
+Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https://strix.ai/install | bash`) and `LLM_API_KEY`. A `quick` mode run takes minutes; `deep` can take hours. On the instance the image contains Strix at a pinned version and the wrapper fetches the key from Parameter Store (`/vulnscan/openrouter-token`, [deploy/README.md](deploy/README.md#add-the-tokens)); see [docs/operations.md](docs/operations.md#run-a-validation-stage-2).
+
 ## Outputs
 
 Every scan writes these files to its own folder:
@@ -87,6 +107,9 @@ Every scan writes these files to its own folder:
 | `report.json` | Everything: scan metadata, tool status, triage metadata, Claude's summary, every finding with its triage result, and Claude's own findings |
 | `raw/<tool>.json` | Each scanner's original output |
 | `claude-<n>.json` | Claude's raw response for batch *n*, kept for audit (includes `total_cost_usd` and `num_turns`) |
+| `validation.md` / `.json` / `.csv` | Stage 2, after `vulnscan validate`: Strix's PoC-validated findings, with the stage-1 ids they confirm and a best-effort coverage list of what wasn't validated |
+| `strix-instructions.md`, `strix-findings.json` | What was sent to Strix: the generated instructions and the open findings payload |
+| `raw/strix/` | Strix's own artifacts for the validation run (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) |
 
 `report.csv` columns:
 
@@ -133,8 +156,8 @@ vulnscan tools                                       # which scanners are instal
 `repo` accepts `org/repo`, `https://github.com/org/repo`, `git@github.com:org/repo.git`, or a local path.
 
 Exit codes:
-- **0:** the scan completed, whatever it found.
-- **2:** bad input, a repo outside the allowed orgs, or a failed clone.
+- **0:** the scan completed, whatever it found. (Also `validate`: Strix ran and its findings were read, whatever it found.)
+- **2:** bad input, a repo outside the allowed orgs, a failed clone, or (for `validate`) no scan to validate, a missing key, or a failed Strix run.
 - **130:** interrupted.
 
 ### Settings (environment variables)
@@ -149,6 +172,10 @@ Exit codes:
 | `VULNSCAN_TOOL_TIMEOUT` | `1800` | Seconds before each scanner is stopped |
 | `VULNSCAN_TRIAGE_TIMEOUT` | `3600` | Seconds before each Claude batch is stopped |
 | `VULNSCAN_TRIAGE_BATCH` | `100` | Items per Claude call. Smaller values mean more calls. |
+| `LLM_API_KEY` | none | OpenRouter key for stage-2 validation (Strix + GLM 5.3). `OPENROUTER_API_KEY` also works. |
+| `STRIX_LLM` | `openrouter/z-ai/glm-5.3` | Model id for Strix, LiteLLM format. `--model` overrides it. |
+| `VULNSCAN_VALIDATE_TIMEOUT` | `7200` | Seconds before a Strix validation run is stopped |
+| `VULNSCAN_VALIDATE_BUDGET` | `25` | Max LLM spend in USD for one validation run (`--budget`, `0` = no cap) |
 
 ## How long a scan takes
 
@@ -161,6 +188,7 @@ Exit codes:
 ## Coverage limits
 
 - **Only one branch,** the default or `--ref`, and only its latest commit. Secrets that were committed and later deleted are still in git history but aren't found.
+- **Validation coverage is best effort.** Strix only reports what it could reproduce, which is the point; but an issue it couldn't reach (an app it couldn't stand up, a URL that needs auth you didn't supply) stays unvalidated, and the stage-1 findings it references are matched from the ids it names in its reports.
 - **Static analysis only.** Nothing is run or tested against a live app, and business-logic flaws are mostly out of reach.
 - **Claude's verdicts are judgements, not proof.** A grouped rule is judged from 5 samples.
 - **Claude's own review is capped at 10 issues** and is shallow on large repos ([What Claude does](#what-claude-does)).
@@ -176,7 +204,8 @@ The scanner holds read access to your code and produces a list of its weaknesses
 - **Secret values are redacted** by gitleaks before they reach disk.
 - **Files are private.** Everything is created readable by the current user only (umask 077).
 - **The org restriction** (`VULNSCAN_GITHUB_ORG`) stops it being pointed at arbitrary repos.
-- **In production:** each scan runs in a container with no AWS credentials or Linux capabilities, on an instance that has no inbound access, allows outbound HTTPS only, and can read only its own two tokens ([deploy/README.md](deploy/README.md)).
+- **Validation runs inside Strix's own Docker sandbox,** which is the one place the scanned repo's code may run — deliberately, because PoC validation needs it. vulnscan clones the repo itself and passes a local directory, so the GitHub token never reaches Strix; Strix gets only its own `LLM_API_KEY`, and `--url` targets are the operator's responsibility to authorise. Local folders and stage-1 clones are copied first, because Strix mounts targets writable.
+- **In production:** each scan runs in a container with no AWS credentials or Linux capabilities, on an instance that has no inbound access, allows outbound HTTPS only, and can read only its own three tokens ([deploy/README.md](deploy/README.md)). Validate containers additionally get the host Docker socket — the exception above, given to no other run.
 
 ## Adding a scanner
 

@@ -62,6 +62,22 @@ vulnscan scan scaler-hq/<repo> --ref <branch> --max-triage 600   # other flags: 
 - **To stop a scan:** `docker stop <id>`.
 - Containers left behind by an ended session are removed by the next `vulnscan` run.
 
+## Run a validation (stage 2)
+
+After a finished scan of the repo, `vulnscan validate` re-checks its open findings with Strix (PoC-driven validation, GLM 5.3 via OpenRouter). It needs `/vulnscan/openrouter-token` to be set ([deploy/README.md](../deploy/README.md#add-the-tokens)) and the image rebuilt since stage 2 was added.
+
+```bash
+vulnscan validate KingsGambitLab/<repo>                        # the repo's latest scan, standard mode, budget $25
+vulnscan validate KingsGambitLab/<repo> --scan-mode quick --budget 5
+vulnscan validate scaler-hq/<repo> --url https://staging.example.com --instruction "login: user/pass"
+```
+
+- Read `validation.md` in the same run folder as the scan (`/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/`): validated findings with PoCs, and the stage-1 ids they confirm. Strix's own artifacts are under `raw/strix/`.
+- `quick` mode takes minutes, `deep` can take hours; the run is stopped after `VULNSCAN_VALIDATE_TIMEOUT` (default 2 h) and the LLM spend is capped by `--budget`.
+- The wrapper gives **validate containers only** the Docker socket (Strix runs its sandbox on the host); a validate run also copies the repo into the run folder, which briefly doubles its disk use there.
+- Stage 1 doesn't need re-running: validate reads the newest `report.json` for that repo and clones the repo itself.
+- Sessions still end after 60 minutes; validation is detached like a scan, so reattach with `docker logs -f <id>`.
+
 ## Read the results
 
 Reports are in `/var/lib/vulnscan/scans/<org>__<repo>/<UTC timestamp>/`. A folder **without** `report.md` is a scan that didn't finish.
@@ -145,7 +161,7 @@ GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$t" | bas
   git ls-remote --heads https://github.com/<org>/<private-repo>.git >/dev/null && echo "github token OK"; unset t
 ```
 
-For the Claude token, the value should start with `sk-ant-oat` and must not be `todo update me`.
+For the Claude token, the value should start with `sk-ant-oat` and must not be `todo update me`. The same goes for `/vulnscan/openrouter-token` (it should start with `sk-or-`), which only `vulnscan validate` reads.
 
 ## Rotate a token (change)
 
@@ -177,6 +193,12 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `… is outside the allowed orgs` (exit 2) | The repo's owner isn't in `VULNSCAN_GITHUB_ORG` | Expected. To allow another org, **(change)** edit `/etc/vulnscan/config`, and `github_org` in `terraform.tfvars` to match. |
 | Report says `Claude triage: partial` or `failed` | A batch timed out, hit usage limits, or returned no structured output | Look at `errors` in `report.json` and at `claude-<n>.json`. Re-run later, or raise `VULNSCAN_TRIAGE_TIMEOUT`. |
 | `gosec: failed: produced no report` (local runs) | The Go toolchain isn't installed | Install Go. The image includes it. |
+| `validate`: `/vulnscan/openrouter-token is still the placeholder` | The third parameter hasn't been set | Set it ([deploy/README.md](../deploy/README.md#add-the-tokens)) and re-run |
+| `validate`: `strix CLI not found on PATH` | The image predates stage 2 | Run `vulnscan-build`, then retry |
+| `validate`: `no finished scan for <repo>` | There's no run folder with a `report.json` for that repo | Run `vulnscan scan` first, or pass `--run <folder>` |
+| `validate`: `permission denied … /var/run/docker.sock` | The socket's group wasn't added, or Docker restarted and changed its group id | Re-run; if it persists, check `stat -c %g /var/run/docker.sock` on the host and the wrapper's `--group-add` |
+| `validate` stops with a budget message | The `--max-budget` cap was reached; partial results are still written | Re-run with a higher `--budget`, or fewer items (`--max-validate`) |
+| `report.json` says the volume is filling during `validate` | The repo copy (`strix-target/`) briefly doubles the repo's size on the reports volume | Grow `data_volume_gb` ([deploy/README.md](../deploy/README.md#maintenance)), or validate big repos one `--ref` at a time |
 | A scan folder has no `report.md` | The scan was interrupted (old foreground wrapper, a Spot stop, or `docker stop`) | Re-run. |
 
 ## Infrastructure changes (change)

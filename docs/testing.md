@@ -6,6 +6,7 @@ There's no automated test suite yet. These are the checks used during developmen
 |---|---|
 | Any Python | 1, 2, and 5 without Claude |
 | `triage.py` or `report.py` | 1, 2, 3, and 5 with Claude |
+| `validate.py` or its docs | 1 and 10 (and 11 once Strix is installed) |
 | `Dockerfile` | 6 |
 | `deploy/host/*` | 7 |
 | `deploy/terraform/*` | 8 (plan only; applying needs approval) |
@@ -109,8 +110,8 @@ On 2026-11-04 the deliberately vulnerable sample app took 4 min 46 s in total (3
 
 ```bash
 docker build -t vulnscan:test .                                   # native architecture
-docker build --platform linux/amd64 -t vulnscan:test-amd64 .     # the instance's architecture (t3); emulated on Apple Silicon
-docker run --rm --entrypoint sh vulnscan:test -c 'semgrep --version; brakeman --version; gosec -version; claude --version; go version'
+docker build --platform linux/amd64 -t vulnscan:test-amd64 .      # the instance's architecture (t3); emulated on Apple Silicon
+docker run --rm --entrypoint sh vulnscan:test -c 'semgrep --version; brakeman --version; gosec -version; claude --version; go version; strix --help >/dev/null && echo strix-ok'
 docker run --rm --init --cap-drop ALL --security-opt no-new-privileges --memory 4g \
   -e VULNSCAN_GITHUB_ORG=OWASP vulnscan:test scan OWASP/railsgoat --no-llm
 ```
@@ -140,6 +141,7 @@ Also check:
 - **Session loss:** start a long scan in the background and `kill -HUP` the wrapper. The container must keep running and finish.
 - **Ctrl-C:** under `set -m`, `kill -INT -- -<pgid>`. Expect exit 130, the "scan continues" message, and the container still running.
 - **Cleanup:** the next run removes leftover containers (`docker ps -a --filter label=vulnscan`).
+- **The validate branch:** with a stubbed `docker` that prints its arguments (and a fake `aws` returning the placeholder for `openrouter-token`), check that `validate` exits 2 on the placeholder message, that a set token adds `-e LLM_API_KEY`, `--group-add <gid>` and the socket mount to `docker run`, and that `scan` gets none of them.
 
 Clean up afterwards with `docker ps -aq --filter label=vulnscan | xargs -r docker rm -f`.
 
@@ -163,3 +165,48 @@ User data must stay under 16 KB; it's about 4.4 KB now.
 ## 9. On the instance, after the owner pushes
 
 Run `vulnscan-build`, then one small scan, then check the new behaviour in the report. Use the read-only checks in [operations.md](operations.md#health-checks).
+
+## 10. Validation stage with a stand-in Strix (no Docker, no spend)
+
+Fake `strix` on `PATH` and a fabricated stage-1 run folder; `validate.py` can't tell the difference. This is the pattern used on 2026-11-04:
+
+```bash
+# T=/tmp/vstest; mkdir -p $T/bin $T/scans/demo__app/20261104-120000/raw $T/target
+# 1. fake strix: ignores its arguments, writes plausible artifacts, exits 2 (findings found)
+cat > $T/bin/strix <<'EOF'
+#!/bin/bash
+mkdir -p strix_runs/fake-run/vulnerabilities
+cat > strix_runs/fake-run/vulnerabilities.json <<'JSON'
+{"vulnerabilities": [
+ {"title": "SQL injection (validates F001)", "severity": "critical",
+  "poc": "GET /users?id=1 OR 1=1 returns all users", "remediation": "parameterise",
+  "location": "app/controllers/users_controller.rb:42"}]}
+JSON
+printf '{"status":"completed","llm_usage":{"cost":1.23}}' > strix_runs/fake-run/run.json
+exit 2
+EOF
+chmod +x $T/bin/strix
+# 2. a report.json with one confirmed, one needs_review, one untriaged, one
+#    false_positive finding and one additional_findings entry (C01)
+# 3. run it
+PATH=$T/bin:$PATH VULNSCAN_HOME=$T LLM_API_KEY=fake \
+  .venv/bin/vulnscan validate $T/target --url https://staging.example.com; echo "exit $?"   # expect 0
+```
+
+What to verify:
+- **Selection:** false positives and duplicates are not sent; everything else is, worst first, capped by `--max-validate`; `C01` is included.
+- **Seeding:** `strix-instructions.md` lists the findings with the untrusted-data warning, the live target and the operator instructions; `strix-findings.json` is the payload.
+- **Parsing:** `V001…` findings carry the PoC, fix, and the `F001`/`C01` ids from their text (try a dict-shaped and a `file:line` location, and a `=HYPERLINK…` title — the CSV must show `'=HYPERLINK…`).
+- **Coverage:** `validation.md` lists which sent findings Strix's findings reference.
+- **Errors:** missing `LLM_API_KEY` exits 2 *before* anything is cloned; a strix that exits 1 still writes partial reports and exits 2; garbage artifacts with exit 2 are an error, not "no findings"; a report with everything dismissed writes "nothing to validate" and skips Strix.
+- **Hygiene:** a local target is copied (Strix mounts targets writable) and the copy removed afterwards (`ls $VULNSCAN_HOME/work`).
+
+## 11. Validation stage with real Strix (uses OpenRouter credits)
+
+```bash
+export LLM_API_KEY=sk-or-...            # OpenRouter
+VULNSCAN_HOME=/tmp/vs .venv/bin/vulnscan scan OWASP/railsgoat --no-llm   # stage 1, cheap
+VULNSCAN_HOME=/tmp/vs .venv/bin/vulnscan validate OWASP/railsgoat --scan-mode quick --budget 5
+```
+
+Check that: `validation.json` → `strix.status` is `completed`, `cost_usd` is under the budget, findings have PoCs and `validates` ids, `raw/strix/` holds Strix's own artifacts, and the "not referenced" coverage list makes sense.

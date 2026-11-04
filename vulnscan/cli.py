@@ -7,6 +7,7 @@ from .installer import InstallError, ensure, find
 from .repo import RepoError
 from .scan import scan
 from .tools import ALL_TOOLS
+from .validate import DEFAULT_MODEL, ValidateError, validate
 
 
 def _cmd_scan(args):
@@ -22,6 +23,23 @@ def _cmd_scan(args):
     print(f"\nOpen findings: {summary}")
     print(f"Report: {report}")
     print(f"Raw data: {report.parent}")
+    return 0
+
+
+def _cmd_validate(args):
+    try:
+        report, counts = validate(
+            args.repo, run_dir=args.run, ref=args.ref, urls=args.url or [], model=args.model,
+            scan_mode=args.scan_mode, budget=args.budget, max_items=args.max_validate,
+            instructions=args.instruction or [],
+        )
+    except (RepoError, ValidateError) as e:
+        log(str(e))
+        return 2
+    summary = ", ".join(f"{n} {s}" for s, n in counts.items()) or "none validated"
+    print(f"\nValidated findings: {summary}")
+    print(f"Report: {report}")
+    print(f"Raw data: {report.parent / 'raw' / 'strix'}")
     return 0
 
 
@@ -63,6 +81,23 @@ def main(argv=None):
     t = sub.add_parser("tools", help="list scanners and whether they are installed")
     t.add_argument("--install", action="store_true", help="install every missing scanner")
     t.set_defaults(func=_cmd_tools)
+
+    v = sub.add_parser("validate", help="stage 2: validate a scan's open findings with Strix (GLM via OpenRouter)")
+    v.add_argument("repo", help="the repo that was scanned: org/repo, a GitHub URL, or a local path")
+    v.add_argument("--run", help="stage-1 run folder with report.json (default: the latest for this repo)")
+    v.add_argument("--ref", help="branch or tag to clone (default: the repo's default branch)")
+    v.add_argument("--url", action="append", help="live target to also test, e.g. the staging deployment "
+                                                  "(repeatable; only systems you are authorised to test)")
+    v.add_argument("--max-validate", type=int, default=100,
+                   help="max open findings to send, worst first (default: 100)")
+    v.add_argument("--scan-mode", choices=["quick", "standard", "deep"], default="standard",
+                   help="Strix scan depth (default: standard)")
+    v.add_argument("--budget", type=float,
+                   help="max LLM spend in USD for the whole run (default: VULNSCAN_VALIDATE_BUDGET, 25; 0 = no cap)")
+    v.add_argument("--model", help=f"model id for Strix, in LiteLLM format (default: STRIX_LLM or {DEFAULT_MODEL})")
+    v.add_argument("--instruction", action="append",
+                   help="extra instruction for Strix, e.g. test credentials (repeatable)")
+    v.set_defaults(func=_cmd_validate)
 
     args = parser.parse_args(argv)
     try:

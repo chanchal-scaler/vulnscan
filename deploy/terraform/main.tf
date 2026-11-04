@@ -138,8 +138,9 @@ resource "aws_iam_instance_profile" "this" {
 # Created with a placeholder; replace the values by hand (deploy/README.md).
 # value_wo is write-only: neither the placeholder nor the real token is ever stored in
 # Terraform state, and Terraform doesn't overwrite a value changed outside it.
+# openrouter-token is the stage-2 validation key (LLM_API_KEY for Strix + GLM).
 resource "aws_ssm_parameter" "token" {
-  for_each = toset(["github-token", "claude-token"])
+  for_each = toset(["github-token", "claude-token", "openrouter-token"])
 
   name             = "${var.ssm_prefix}/${each.key}"
   type             = "SecureString"

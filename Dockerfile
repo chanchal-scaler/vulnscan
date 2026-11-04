@@ -12,6 +12,7 @@ ARG SEMGREP_VERSION=1.183.0
 ARG CHECKOV_VERSION=3.4.3
 ARG BANDIT_VERSION=1.9.4
 ARG BRAKEMAN_VERSION=8.1.0
+ARG STRIX_VERSION=1.7.0
 
 # apt over HTTPS: the EC2 instance only allows outbound 443.
 RUN sed -i 's#http://deb.debian.org#https://deb.debian.org#g' /etc/apt/sources.list.d/debian.sources \
@@ -57,6 +58,13 @@ RUN set -eu; \
     done; \
     gem install --no-document brakeman -v "$BRAKEMAN_VERSION"
 
+# Strix, the stage-2 validation harness: its own venv too. The package is strix-agent
+# but its console script is `strix`, so it can't go in the loop above.
+RUN set -eu; \
+    python -m venv /opt/tools/strix; \
+    /opt/tools/strix/bin/pip install --no-cache-dir "strix-agent==${STRIX_VERSION}"; \
+    ln -s /opt/tools/strix/bin/strix /usr/local/bin/strix
+
 COPY pyproject.toml /opt/vulnscan-src/
 COPY vulnscan /opt/vulnscan-src/vulnscan
 RUN python -m venv /opt/vulnscan \
@@ -67,9 +75,12 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin scanner \
  && install -d -o scanner -g scanner -m 700 /var/lib/vulnscan
 
 # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC also turns off Claude Code's auto-updater and telemetry.
+# STRIX_IMAGE pins the sandbox Strix's pentest agents run in. It is pulled by the host's
+# Docker daemon (not inside this image) at validate time; vulnscan-build pre-pulls it.
 ENV PATH=/usr/local/go/bin:$PATH \
     VULNSCAN_HOME=/var/lib/vulnscan \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    STRIX_IMAGE=ghcr.io/usestrix/strix-sandbox:1.3.0
 
 USER scanner
 WORKDIR /home/scanner

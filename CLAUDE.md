@@ -4,7 +4,8 @@ vulnscan is a Python CLI that scans one GitHub repo for security issues:
 - It detects the repo's stacks and runs the scanners that fit (semgrep, osv-scanner, gitleaks, checkov, brakeman, bandit, gosec).
 - It merges their output into one finding format.
 - It uses Claude Code (headless, read-only) to verify the findings and look for issues scanners miss.
-- It writes `report.md`, `report.json` and `report.csv`.
+- `vulnscan validate` (stage 2) re-checks a scan's open findings with Strix, whose agents run in Strix's own Docker sandbox and report only findings with a working PoC; its LLM is GLM 5.3 via OpenRouter.
+- It writes `report.md`, `report.json` and `report.csv` (plus `validation.*` after stage 2).
 
 It runs as a proof of concept on one EC2 Spot instance in a staging AWS account, with each scan in a throwaway Docker container.
 
@@ -13,7 +14,7 @@ It runs as a proof of concept on one EC2 Spot instance in a staging AWS account,
 | Doc | Contents |
 |---|---|
 | [README.md](README.md) | What it finds, Claude's role, outputs and CSV columns, CLI and settings, security model, limits |
-| [docs/architecture.md](docs/architecture.md) | Code layout, how a scan flows, the triage pipeline, report formats, image and Terraform contents |
+| [docs/architecture.md](docs/architecture.md) | Code layout, how a scan flows, the triage pipeline, the validation stage, report formats, image and Terraform contents |
 | [docs/decisions.md](docs/decisions.md) | Why things are the way they are, including approaches that were tried and rejected. Check here before "improving" something. |
 | [deploy/README.md](deploy/README.md) | What Terraform creates, first-time deployment, maintenance |
 | [docs/operations.md](docs/operations.md) | Runbook: connect, build, scan, read and copy results, health checks, troubleshooting |
@@ -43,6 +44,7 @@ The first-boot script (`user_data.sh.tftpl`) only runs when an instance is creat
 python3 -m venv .venv && .venv/bin/pip install -e .   # local setup (Python 3.9+, stdlib only)
 .venv/bin/python -m compileall -q vulnscan             # syntax check
 .venv/bin/vulnscan scan OWASP/railsgoat --no-llm       # scanners only, on a public vulnerable app
+LLM_API_KEY=sk-or-… .venv/bin/vulnscan validate OWASP/railsgoat   # stage 2 (needs Docker + strix CLI)
 docker build -t vulnscan:test .                        # the production image
 cd deploy/terraform && terraform fmt && terraform validate
 AWS_PROFILE=<profile> terraform plan                   # read-only; profile is in ENVIRONMENT.local.md
@@ -52,9 +54,10 @@ AWS_PROFILE=<profile> terraform plan                   # read-only; profile is i
 
 - **Scanners never get secrets.** They run with `config.scanner_env()`, an allowlist of environment variables.
 - **Claude runs restricted.** It runs as `claude -p --restricted --strict-mcp-config --tools Read,Grep,Glob`, with the run folder (not the repo) as its working directory, so the repo's `.claude/` settings and hooks never load. Every `GITHUB_TOKEN*` and `GH_TOKEN*` variable is removed from its environment.
-- **The scanned repo's code and dependencies are never run or installed.** No `bundle install` or `npm install`.
+- **The scanned repo's code and dependencies are never run or installed** in the vulnscan process or its container. No `bundle install` or `npm install`. The one deliberate exception: stage-2 validation, where Strix runs the code inside **Strix's own Docker sandbox** — never in the vulnscan container — against a throwaway clone or copy (Strix mounts targets writable).
+- **The GitHub token never reaches Strix.** `vulnscan validate` clones the repo itself (org allowlist, `GIT_CONFIG_*`) and passes a local directory; Strix's environment holds only `STRIX_LLM`, `LLM_API_KEY` and what it needs to reach Docker.
 - **GitHub tokens reach git only through `GIT_CONFIG_*` environment variables,** never in a URL, on a command line or in `.git/config`.
-- **Container hardening.** The container has no AWS access (IMDS hop limit 1). It runs with `--cap-drop ALL` and `no-new-privileges`, as uid 10001, with only the reports directory mounted.
+- **Container hardening.** The container has no AWS access (IMDS hop limit 1). It runs with `--cap-drop ALL` and `no-new-privileges`, as uid 10001, with only the reports directory mounted. **Exception:** `vulnscan validate` containers also get the host Docker socket (with its group id), because Strix must start its sandbox containers on the host daemon. The wrapper gives it to no other subcommand.
 - **Instance role.** Session Manager plus `ssm:GetParameter` on `/vulnscan/*`, nothing else. Never attach `AmazonSSMManagedInstanceCore`: it can read every parameter in the account.
 - **Outbound traffic from the instance is TCP 443 only.** Everything a build or scan downloads must use HTTPS.
 - **Token parameters use `value_wo`,** so their values never enter Terraform state.

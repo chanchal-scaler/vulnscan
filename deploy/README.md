@@ -24,7 +24,7 @@ Dockerfile     the scanner image: all runtimes and scanners at pinned versions a
 | Metadata | IMDSv2 required, with a hop limit of 1, so containers can't get the instance role's credentials. |
 | Disks | Encrypted gp3. Reports are on a separate 5 GB volume mounted at `/var/lib/vulnscan`, so they survive the instance being replaced. |
 | Instance | `instance_type` (variable default `t4g.large`; the live deployment sets `t3.large` in `terraform.tfvars`, because t4g had no Spot capacity), Amazon Linux 2023 for the type's architecture.<br>**Spot:** a persistent request that **stops** the instance on interruption, keeping the disks, and restarts it when capacity returns.<br>**Unlimited CPU credits:** T-family instances get no launch credits, so `standard` mode throttles a new instance to 30% CPU. |
-| Parameters | `/vulnscan/github-token` and `/vulnscan/claude-token`, created as placeholders; you set the real values ([below](#add-the-tokens)) |
+| Parameters | `/vulnscan/github-token`, `/vulnscan/claude-token` and `/vulnscan/openrouter-token` (stage-2 validation key), created as placeholders; you set the real values ([below](#add-the-tokens)) |
 
 Cost is about $29 a month in us-west-2:
 - **Instance:** about $23 at the current t3.large Spot price ($0.032/hr; on-demand would be $0.0832/hr).
@@ -51,7 +51,7 @@ State is kept locally in `terraform.tfstate`, and it's the only copy, so back it
 
 ## Add the tokens
 
-`terraform apply` creates `/vulnscan/github-token` and `/vulnscan/claude-token` with the placeholder value `todo update me`. Replace the placeholders by hand. Terraform won't overwrite your values, and they never reach its state file:
+`terraform apply` creates `/vulnscan/github-token`, `/vulnscan/claude-token` and `/vulnscan/openrouter-token` with the placeholder value `todo update me`. Replace the placeholders by hand. Terraform won't overwrite your values, and they never reach its state file:
 
 ```bash
 read -rs GH && aws ssm put-parameter --region <region> --overwrite \
@@ -63,11 +63,19 @@ read -rs ST && aws ssm put-parameter --region <region> --type SecureString \
   --name /vulnscan/source-token --value "$ST"; unset ST
 ```
 
+If the deployment predates stage 2, `terraform apply` first creates `openrouter-token` as a placeholder; then:
+
+```bash
+read -rs OR && aws ssm put-parameter --region <region> --overwrite \
+  --name /vulnscan/openrouter-token --value "$OR"; unset OR
+```
+
 - **`github-token`**: a classic personal access token with the `repo` scope, from a user who can read every org in `github_org`. Used by `vulnscan scan`.
   - If an org uses SAML single sign-on, authorize the token for it (*Configure SSO* on the token's page).
   - `repo` also allows pushing to those repos, so give the token an expiry, and revoke it if the instance is ever suspected compromised.
 - **`source-token`** (only if the vulnscan repo is private): a fine-grained token with read-only Contents on the vulnscan repo only. Used by `vulnscan-build`. It's separate because a fine-grained token can only reach one owner's repos.
 - **`claude-token`**: the output of `claude setup-token`.
+- **`openrouter-token`**: an OpenRouter API key (`sk-or-…`, [openrouter.ai/keys](https://openrouter.ai/keys)), used only by `vulnscan validate` as `LLM_API_KEY` for GLM 5.3. `vulnscan scan` doesn't read it.
 
 ## Build and scan
 
@@ -92,6 +100,7 @@ To read results, list the open critical and high findings, or copy a report to y
 
 - **Updating vulnscan or the scanners:** change the code or the pinned versions in the `Dockerfile`, push, then run `vulnscan-build` again.
   - Pinned scanners still find new issues, because OSV data and Semgrep rules are fetched on every scan.
+  - `vulnscan-build` also pre-pulls Strix's sandbox image (`STRIX_IMAGE` in the Dockerfile), so the first `vulnscan validate` doesn't wait on it.
   - Rebuild about once a month anyway, to pick up the base image's security fixes.
 - **Disk space:** each scan's report takes about 1 MB, so the 5 GB reports disk holds thousands of scans. To grow a disk, raise `root_volume_gb` or `data_volume_gb` and apply; the instance keeps running. Then, on the instance, run `xfs_growfs /var/lib/vulnscan` for the reports disk, or `growpart /dev/nvme0n1 1 && xfs_growfs /` for the root disk.
 - **OS patches:** run `dnf upgrade --releasever=latest`, or run `terraform apply -replace=aws_instance.this` to move to the newest AMI. Replacing the instance keeps the reports volume. Run `vulnscan-build` afterwards, since the image lives on the root disk.
