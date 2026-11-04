@@ -151,7 +151,9 @@ def _strix_env(model):
         raise ValidateError("LLM_API_KEY (or OPENROUTER_API_KEY) is not set: the OpenRouter key for the validation model")
     allow = ("PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TMPDIR",
              "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
-             "DOCKER_HOST", "DOCKER_CONTEXT")
+             "DOCKER_HOST", "DOCKER_CONTEXT",
+             # Set in the image: which sandbox to run, and the network Strix reaches it on.
+             "STRIX_IMAGE", "STRIX_DOCKER_SANDBOX_NETWORK")
     env = {k: os.environ[k] for k in allow if k in os.environ}
     env.update(STRIX_LLM=model, LLM_API_KEY=key, STRIX_TELEMETRY="0")
     return env

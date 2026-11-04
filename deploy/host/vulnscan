@@ -50,6 +50,19 @@ if [ "$validate" = "validate" ]; then
   # scans folder (mounted on both sides), because the sandbox mounts it from the host.
   run_args+=(-e LLM_API_KEY --group-add "$(stat -c %g /var/run/docker.sock)"
     -v /var/run/docker.sock:/var/run/docker.sock)
+  # The sandbox's entrypoint remaps its user to Strix's uid (the image's 10001) at start,
+  # but Strix writes into /workspace before that finishes and fails. With the user baked
+  # in, the remap is skipped. The tag must match STRIX_IMAGE in the Dockerfile.
+  if ! docker image inspect vulnscan-strix-sandbox:1.3.0 >/dev/null 2>&1; then
+    echo "[vulnscan] building vulnscan-strix-sandbox:1.3.0 (first validate only, a few minutes)" >&2
+    docker build -q -t vulnscan-strix-sandbox:1.3.0 - >/dev/null <<'EOF'
+FROM ghcr.io/usestrix/strix-sandbox:1.3.0
+USER root
+RUN usermod -u 10001 pentester && groupmod -g 10001 pentester \
+ && chown -R 10001:10001 /home/pentester /app/certs /workspace
+USER pentester
+EOF
+  fi
 fi
 cid=$(docker run "${run_args[@]}" vulnscan:latest "$@")
 id=${cid:0:12}

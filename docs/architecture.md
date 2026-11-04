@@ -203,7 +203,7 @@ On the instance, the repo copy Strix tests (`strix-target/`) is placed inside th
 
 - **Python tools,** pinned, each in its own virtualenv under `/opt/tools`: semgrep 1.183.0, checkov 3.4.3, bandit 1.9.4, and strix-agent 1.7.0 (stage 2; console script `strix`).
 - **Ruby:** brakeman 8.1.0 (gem).
-- **Strix's pentest sandbox** is not in the image: it runs as sibling containers on the **host's** Docker daemon, started by Strix at validate time. Its tag is pinned through `STRIX_IMAGE` (currently `ghcr.io/usestrix/strix-sandbox:1.3.0`) and pre-pulled by `vulnscan-build`.
+- **Strix's pentest sandbox** is not in the image: it runs as sibling containers on the **host's** Docker daemon, started by Strix at validate time. `STRIX_IMAGE` is `vulnscan-strix-sandbox:1.3.0`, which the wrapper builds on the first validate from the pinned `ghcr.io/usestrix/strix-sandbox:1.3.0` (pre-pulled by `vulnscan-build`) with the sandbox user set to uid 10001. `STRIX_DOCKER_SANDBOX_NETWORK=bridge` makes Strix reach the sandbox's Caido proxy by its bridge IP. `validate.py` passes both to Strix; see [decisions.md](decisions.md).
 - **vulnscan** is installed into `/opt/vulnscan` from `pyproject.toml` and `vulnscan/`. `.dockerignore` excludes `deploy/`, `.git` and `.venv`.
 - **User:** `scanner` (uid 10001), with `/var/lib/vulnscan` owned by it.
 - **Environment:** `PATH` includes `/usr/local/go/bin`, `VULNSCAN_HOME=/var/lib/vulnscan`, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no auto-updater, no telemetry).

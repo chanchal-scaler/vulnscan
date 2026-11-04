@@ -82,12 +82,16 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin scanner \
  && install -d -o scanner -g scanner -m 700 /var/lib/vulnscan
 
 # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC also turns off Claude Code's auto-updater and telemetry.
-# STRIX_IMAGE pins the sandbox Strix's pentest agents run in. It is pulled by the host's
-# Docker daemon (not inside this image) at validate time; vulnscan-build pre-pulls it.
+# STRIX_IMAGE is the sandbox Strix's pentest agents run in, on the host's Docker daemon
+# (not inside this image): ghcr.io/usestrix/strix-sandbox:1.3.0 with its user set to this
+# image's uid, built by the host wrapper (deploy/host/vulnscan) on the first validate.
+# STRIX_DOCKER_SANDBOX_NETWORK makes Strix reach the sandbox's proxy by its IP on the
+# default bridge; its default, 127.0.0.1 on the host, is unreachable from this container.
 ENV PATH=/usr/local/go/bin:$PATH \
     VULNSCAN_HOME=/var/lib/vulnscan \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-    STRIX_IMAGE=ghcr.io/usestrix/strix-sandbox:1.3.0
+    STRIX_IMAGE=vulnscan-strix-sandbox:1.3.0 \
+    STRIX_DOCKER_SANDBOX_NETWORK=bridge
 
 USER scanner
 WORKDIR /home/scanner
