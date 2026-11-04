@@ -23,15 +23,16 @@ def parse_github(spec):
     return (m.group("owner"), m.group("name")) if m else None
 
 
-def _clone(owner, name, dest, ref):
-    cmd = ["git", "clone", "--depth", "1", "--quiet"]
-    if ref:
-        cmd += ["--branch", ref]
-    cmd += [f"https://github.com/{owner}/{name}.git", str(dest)]
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+def github_token(owner):
     # A fine-grained token only reaches one owner's repos, so a per-org token
     # (GITHUB_TOKEN_SCALER_HQ for scaler-hq) wins over the generic one.
-    token = os.environ.get("GITHUB_TOKEN_" + re.sub(r"\W", "_", owner).upper()) or os.environ.get("GITHUB_TOKEN")
+    return os.environ.get("GITHUB_TOKEN_" + re.sub(r"\W", "_", owner).upper()) or os.environ.get("GITHUB_TOKEN")
+
+
+def git_env(owner):
+    """Environment for git talking to github.com, with the owner's token if there is one."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+    token = github_token(owner)
     if token:
         # Passed through the environment so it never lands in .git/config or the process list.
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -40,7 +41,15 @@ def _clone(owner, name, dest, ref):
             GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
             GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {basic}",
         )
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    return env
+
+
+def _clone(owner, name, dest, ref):
+    cmd = ["git", "clone", "--depth", "1", "--quiet"]
+    if ref:
+        cmd += ["--branch", ref]
+    cmd += [f"https://github.com/{owner}/{name}.git", str(dest)]
+    proc = subprocess.run(cmd, env=git_env(owner), capture_output=True, text=True)
     if proc.returncode != 0:
         raise RepoError(f"git clone failed: {proc.stderr.strip()}")
 

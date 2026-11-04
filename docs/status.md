@@ -10,6 +10,7 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 - **Tokens:** one classic GitHub PAT and one Claude Code `setup-token`, both in Parameter Store under `/vulnscan/`. Stage 2 adds `/vulnscan/openrouter-token` (an OpenRouter key for Strix + GLM 5.3): created by the next `terraform apply` and set by hand.
 - **Cost:** about $29 a month. The instance is about $23 at the current Spot price, disks $2, the public IPv4 address $3.65. The Claude subscription is separate; validation spends against the OpenRouter key, capped by `--budget` (default $25 a run).
 - **Stage 2 (validation):** the code, the image (Strix 1.7.0, sandbox 1.3.0) and the wrapper wiring are done, but nothing is on the instance yet: the owner pushes, `vulnscan-build` rebuilds, `terraform apply` adds the parameter, the key is set, and the first validation is run. None of that has happened.
+- **Stage 3 (`vulnscan fix`):** the code is done. It needs no image, wrapper, Terraform or token change, because it uses the existing GitHub PAT (`repo` scope) and Claude token. It reaches the instance with the next `vulnscan-build`, and it can only run after a validation has.
 
 ## Verified
 
@@ -30,6 +31,12 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 - **`report.csv`:** written, with formula escaping checked.
 - **Validation stage (local):** unit-tested with a stand-in Strix — selection and ordering of open findings, seeding files, parsing of `vulnerabilities.json` (both location shapes) with SARIF fallback, PoC/fix/id extraction, coverage lists, CSV formula escaping, the nothing-to-validate path, and the failure paths (missing key, exit 1, unparseable artifacts). Not yet run with real Strix or real OpenRouter credits.
 
+- **Fix stage (local, 2026-11-04):**
+  - Tested with a stand-in Claude and GitHub against a local bare repo: every status, the guards, idempotency, the commit identity, and that stray files from a "not fixed" attempt never get committed.
+  - Dry-run end to end with real Claude on OWASP/railsgoat: a correct one-line fix and no permission denials.
+  - Real restricted Claude was confirmed to edit files in `--add-dir` and to be refused a write to `.git/hooks`.
+  - Not yet run against a private repo, so no real push or PR has happened.
+
 ## Scans run
 
 - **The largest Rails monolith (63k files, about 7,700 findings):** one complete scan, with the **old** triage (first 150 by severity), on 2026-11-03.
@@ -48,7 +55,10 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 | semgrep's full runtime on the biggest repo hasn't been measured | It may need more than 30 minutes | Use `VULNSCAN_TOOL_TIMEOUT=3600`; note the time after the next run |
 | The `instance_type` variable defaults to `t4g.large`, but the deployment uses `t3.large` (set in `terraform.tfvars`) | A fresh deployment without tfvars gets t4g, which had no Spot capacity | Consider changing the default |
 | Terraform state exists only on the operator's machine | If that machine is lost, the deployment can only be managed by hand | Back up, or move to an S3 backend with locking |
-| A single classic GitHub PAT has write access to every repo its user can reach | If leaked, it allows pushing to org repos | Fine-grained per-org tokens (already supported) or a GitHub App |
+| A single classic GitHub PAT has write access to every repo its user can reach | If leaked, it allows pushing to org repos. `vulnscan fix` now relies on that write access (branches and PRs) | Fine-grained per-org tokens (already supported) with Contents and Pull requests set to read and write, or a GitHub App |
+| `vulnscan fix` lets Claude write to a clone of untrusted code | Repo content could steer Claude into writing a harmful change into a PR | Draft PRs only, no shell or token for Claude, `--restricted` blocks `.git` and settings writes, and the PR needs human review before merging ([decisions.md](decisions.md)) |
+| `fix` PRs are authored by the PAT's user, and commits by `vulnscan <vulnscan@noreply.invalid>` | Commits are unverified and unlinked. A ruleset that restricts commit emails or requires signed commits will reject the push or block the merge | Use a GitHub App (signed bot commits), or set the identity to the PAT user's noreply address |
+| `fix` can't regenerate lockfiles | Dependency findings are usually "not fixed": Claude changes versions only when it can keep the manifest and lockfile consistent by hand | Bump dependencies with Dependabot or by hand |
 | Claude runs on one person's subscription token | Usage limits are shared with that person's own use, and the token stops working if they leave | Switch to Bedrock (the instance role) or an API key; no code change needed |
 | `vulnerabilities.json` has no documented schema | A Strix release could change field names and validation reports would come out empty | Parsed defensively with a SARIF fallback, and exit 2 with nothing parsed is an error, not "no findings"; raw artifacts are always kept under `raw/strix/` for a fix |
 | Strix's findings are matched back to stage 1 by the ids it names in its text | Coverage lists can undercount (a finding validated but not labelled stays "not referenced") | The instruction file asks Strix to name ids; treat the coverage list as best effort |

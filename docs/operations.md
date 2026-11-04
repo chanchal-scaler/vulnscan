@@ -78,6 +78,21 @@ vulnscan validate scaler-hq/<repo> --url https://staging.example.com --instructi
 - Stage 1 doesn't need re-running: validate reads the newest `report.json` for that repo and clones the repo itself.
 - Sessions still end after 60 minutes; validation is detached like a scan, so reattach with `docker logs -f <id>`.
 
+## Fix validated findings (stage 3)
+
+After a validation, `vulnscan fix` opens one **draft** PR per finding in `validation.md`. Claude Code writes each fix on its own branch, `vulnscan/fix-<run>-<V id>`, and vulnscan pushes the branch and opens the PR with the GitHub token. This writes to the org's GitHub repos, so try `--dry-run` first on a new repo.
+
+```bash
+vulnscan fix scaler-hq/<repo> --dry-run     # patches only, in <run>/fix/*.patch; nothing pushed
+vulnscan fix scaler-hq/<repo>               # the latest validated run; PRs against the default branch
+vulnscan fix scaler-hq/<repo> --run /var/lib/vulnscan/scans/scaler-hq__<repo>/<timestamp> --ref <branch>
+```
+
+- Read `fix.md` in the run folder. It lists each finding's status and PR link, or why there's no PR.
+- Every PR is a draft and **untested**. Claude can't run the repo's code or tests, so whoever owns the code reviews and tests it before merging.
+- Re-running is safe. Findings whose branch already exists are skipped, so to retry one, delete its branch on GitHub (and close its PR) first.
+- Public repos are refused. It needs no image rebuild beyond `vulnscan-build` and no new token: it uses the same GitHub PAT, which has `repo` scope.
+
 ## Read the results
 
 Reports are in `/var/lib/vulnscan/scans/<org>__<repo>/<UTC timestamp>/`. A folder **without** `report.md` is a scan that didn't finish.
@@ -199,6 +214,11 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `validate`: `permission denied … /var/run/docker.sock` | The socket's group wasn't added, or Docker restarted and changed its group id | Re-run; if it persists, check `stat -c %g /var/run/docker.sock` on the host and the wrapper's `--group-add` |
 | `validate` stops with a budget message | The `--max-budget` cap was reached; partial results are still written | Re-run with a higher `--budget`, or fewer items (`--max-validate`) |
 | `report.json` says the volume is filling during `validate` | The repo copy (`strix-target/`) briefly doubles the repo's size on the reports volume | Grow `data_volume_gb` ([deploy/README.md](../deploy/README.md#maintenance)), or validate big repos one `--ref` at a time |
+| `fix`: `no validated scan for <repo>` | No run folder has a `validation.json` | Run `vulnscan validate` first, or pass `--run <folder>` |
+| `fix`: `<repo> is public` | PRs would disclose the vulnerability | Expected. Use `--dry-run` and fix it through a private security advisory |
+| `fix`: `git push failed … 403` or `GitHub API POST …/pulls: HTTP 403/404` | The token can't push to or open PRs on that repo (read-only fine-grained token, missing SSO authorisation, or a push ruleset) | Check the token's scopes and SSO; for a ruleset (e.g. one restricting commit emails), ask the repo admins |
+| `fix`: `HTTP 422 … Draft pull requests are not supported` | Draft PRs need a paid plan on private repos | Not handled; the branch is pushed, so open the PR from it by hand |
+| `fix`: a finding is `skipped: branch already exists` | An earlier `fix` run already handled it | Expected. Delete the branch to retry |
 | A scan folder has no `report.md` | The scan was interrupted (old foreground wrapper, a Spot stop, or `docker stop`) | Re-run. |
 
 ## Infrastructure changes (change)

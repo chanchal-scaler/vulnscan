@@ -14,6 +14,7 @@ vulnscan/                  Python package (stdlib only, Python 3.9+)
   findings.py              Finding dataclass, severity normalisation, sort order
   triage.py                groups findings into items, batches them, runs headless Claude, maps verdicts back
   validate.py              stage 2: seeds a scan's open findings into Strix (GLM via OpenRouter), collects its artifacts, writes validation reports
+  fix.py                   stage 3: Claude fixes each validated finding on its own branch; vulnscan pushes it and opens a draft PR
   report.py                writes report.json, report.csv and report.md
   config.py                paths, timeouts, batch size, scanner environment allowlist, logging
   tools/                   one module per scanner, all built on tools/base.py
@@ -166,6 +167,24 @@ Stage 2, run with `vulnscan validate <repo>` after a scan. It re-checks the scan
 6. **Reports:** findings are normalised (severity, title, PoC, fix, location), numbered `V001…`, and the stage-1 ids they reference (`F\d{3}`, `C\d{2}`) are extracted from their text into `validates`. `validation.md`, `validation.json` and `validation.csv` are written into the stage-1 run folder, with a best-effort coverage section listing what was and wasn't referenced. Values pass through `report._csv_value` like stage 1.
 
 On the instance, the repo copy Strix tests (`strix-target/`) is placed inside the run folder, not under `work/`: the run folder sits on the scans volume, mounted at the same path on the host and in the vulnscan container, so the host's Docker daemon — which Strix asks to mount the target into its sandbox — can see it. The copy is removed when the run finishes.
+
+## Fix stage (`fix.py`)
+
+Stage 3 is run with `vulnscan fix <repo>` after a validation. It opens one draft PR per finding in `validation.json`.
+
+1. **Find the run:** the latest run folder for that repo that has a `validation.json`, or `--run`. A local folder is refused, because PRs need a GitHub repo. With no validated findings, `fix.md` says so and nothing else runs. Otherwise it checks first that `claude` is on `PATH` and that a GitHub token exists (unless `--dry-run`).
+2. **Checkout:** `repo.checkout` clones as in stage 1, which enforces the org allowlist. `GET /repos/{owner}/{name}` supplies `private` and `default_branch`. A public repo is refused unless `--dry-run`. The PR base is `--ref`, or the default branch. If the HEAD differs from the validation's commit, a warning is logged.
+3. **For each finding** (`_fix_one`):
+   - **Skip check:** if the branch `vulnscan/fix-<run>-<V id>` already exists on GitHub (`git ls-remote`), the finding is skipped. This happens before Claude runs.
+   - **Branch:** `git checkout -f -B <branch> <base sha>`, then `git clean -fdx`, so each finding starts from a clean base.
+   - **Claude:** `triage._run_claude` with `tools="Read,Grep,Glob,Edit,Write"`, which adds `--permission-mode acceptEdits`, and the fix `SCHEMA` (`fixed`, `title`, `summary`, `review_notes`). The working directory is `<run>/fix/` and the repo comes in through `--add-dir`. The prompt has the finding (with its PoC) and the untrusted-data rule. The raw response is saved as `fix/claude-<V id>.json`.
+   - **No fix:** if `fixed` is false or `git status` shows no change, the status is `not fixed` and the reason comes from the review notes.
+   - **Commit:** `git add -A` and a commit with the `vulnscan <vulnscan@noreply.invalid>` identity. Every git call adds `-c core.hooksPath=/dev/null -c commit.gpgsign=false`. The commit is saved as `fix/<V id>.patch`.
+   - **Push and PR:** unless `--dry-run`, vulnscan pushes `HEAD:refs/heads/<branch>` with `repo.git_env` (the token through `GIT_CONFIG_*`). It then calls `POST /repos/{owner}/{name}/pulls` with `draft: true` and the title `[vulnscan] <title>`. The body has the finding, the stage-1 ids, the run and commit, Claude's summary and review notes, and an "untested" warning, but not the PoC. API calls use `urllib` with the token in the `Authorization` header.
+   - **Errors:** a git, Claude or API error marks that finding `failed`, and the loop continues.
+4. **Reports:** `fix.json` has the metadata (`base`, `commit`, `validation_commit`, `model`, `dry_run`, `cost_usd`) and one result per finding: `status`, `branch`, `pr_url` or `error`, and `detail`. `fix.md` shows the same as a table. If any finding failed, `FixError` is raised after the reports are written, so the exit code is 2.
+
+The wrapper needs no special case for `fix`. It already passes `GITHUB_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`, and the container gets no Docker socket.
 
 ## Reports (`report.py`)
 

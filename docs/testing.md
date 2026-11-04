@@ -7,6 +7,7 @@ There's no automated test suite yet. These are the checks used during developmen
 | Any Python | 1, 2, and 5 without Claude |
 | `triage.py` or `report.py` | 1, 2, 3, and 5 with Claude |
 | `validate.py` or its docs | 1 and 10 (and 11 once Strix is installed) |
+| `fix.py`, or `_run_claude` / `git_env` | 1, 12 and 13 |
 | `Dockerfile` | 6 |
 | `deploy/host/*` | 7 |
 | `deploy/terraform/*` | 8 (plan only; applying needs approval) |
@@ -210,3 +211,29 @@ VULNSCAN_HOME=/tmp/vs .venv/bin/vulnscan validate OWASP/railsgoat --scan-mode qu
 ```
 
 Check that: `validation.json` → `strix.status` is `completed`, `cost_usd` is under the budget, findings have PoCs and `validates` ids, `raw/strix/` holds Strix's own artifacts, and the "not referenced" coverage list makes sense.
+
+## 12. Fix stage with a stand-in Claude and GitHub (no quota, nothing pushed)
+
+Patch `fix.checkout` to clone a local bare repo (`file://…/origin.git`) instead of GitHub, `fix._github` to return `{"private": True, "default_branch": "main"}` for GET and `{"html_url": …}` for POST, and `fix._run_claude` to edit a file and return `{"fixed": …, "title", "summary", "review_notes"}`. Seed a run folder with a `validation.json` holding four findings: one fixed, one with `fixed: false` that still leaves a stray file behind, one whose call raises `TriageError`, and one whose branch already exists in the bare repo. This is the pattern used on 2026-11-04.
+
+What to verify:
+- **Statuses:** `pr opened`, `not fixed`, `failed`, `skipped`; the exit code is 2 because of the failure, and `fix.md` and `fix.json` are still written.
+- **Git:** only the fixed finding's branch is pushed. Its commit is authored by `vulnscan <vulnscan@noreply.invalid>`, and the "not fixed" finding's stray file is in no commit or patch.
+- **PR:** the POST is a draft against the default branch, titled `[vulnscan] …`. Its body has the stage-1 ids and the untested warning, and no PoC.
+- **Claude:** it's called with `Read,Grep,Glob,Edit,Write`, with `<run>/fix/` as its working directory. The skipped finding never reaches Claude.
+- **Guards (exit 2):** a public repo without `--dry-run`, no GitHub token, a local folder, no `validation.json`. A public repo with `--dry-run` runs. An empty `validation.json` writes "Nothing to fix" and makes no GitHub or Claude calls.
+- **`--dry-run`:** it makes no POST and pushes nothing. The clone under `work/` is removed afterwards.
+
+## 13. Fix stage dry run with real Claude (uses a little Claude quota, pushes nothing)
+
+```bash
+T=/tmp/vsfix; R=$T/scans/OWASP__railsgoat/20261104-120000; mkdir -p $R
+cat > $R/validation.json <<'EOF'
+{"findings": [{"id": "V001", "severity": "critical", "title": "SQL injection in UsersController#update via params[:user][:id]",
+ "file": "app/controllers/users_controller.rb", "line": null, "rule": "sqli", "description": "update interpolates params[:user][:id] into where()",
+ "poc": "PATCH /users/1 with user[id]=1') OR admin='t' --", "fix": "parameterise", "validates": ["F002"]}]}
+EOF
+VULNSCAN_HOME=$T .venv/bin/vulnscan fix OWASP/railsgoat --dry-run --model sonnet; echo "exit $?"   # expect 0
+```
+
+Check that `fix.md` says `committed (dry run)`, that `fix/V001.patch` is a small, sensible diff, and that `fix/claude-V001.json` has no `permission_denials`. On 2026-11-04 this took 8 turns and cost $0.09 at API rates; Claude replaced the injectable `where` with `current_user`.

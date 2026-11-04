@@ -3,6 +3,7 @@ import os
 import sys
 
 from .config import log
+from .fix import FixError, fix
 from .installer import InstallError, ensure, find
 from .repo import RepoError
 from .scan import scan
@@ -40,6 +41,18 @@ def _cmd_validate(args):
     print(f"\nValidated findings: {summary}")
     print(f"Report: {report}")
     print(f"Raw data: {report.parent / 'raw' / 'strix'}")
+    return 0
+
+
+def _cmd_fix(args):
+    try:
+        report, counts = fix(args.repo, run_dir=args.run, ref=args.ref, model=args.model, dry_run=args.dry_run)
+    except (RepoError, FixError) as e:
+        log(str(e))
+        return 2
+    summary = ", ".join(f"{n} {s}" for s, n in counts.items()) or "nothing to fix"
+    print(f"\nFixes: {summary}")
+    print(f"Report: {report}")
     return 0
 
 
@@ -98,6 +111,15 @@ def main(argv=None):
     v.add_argument("--instruction", action="append",
                    help="extra instruction for Strix, e.g. test credentials (repeatable)")
     v.set_defaults(func=_cmd_validate)
+
+    x = sub.add_parser("fix", help="stage 3: open one draft PR per validated finding, with fixes written by Claude Code")
+    x.add_argument("repo", help="the repo that was validated: org/repo or a GitHub URL")
+    x.add_argument("--run", help="run folder with validation.json (default: the latest for this repo)")
+    x.add_argument("--ref", help="branch to fix and open PRs against (default: the repo's default branch)")
+    x.add_argument("--model", help="Claude model for the fixes, e.g. opus (default: Claude Code's default)")
+    x.add_argument("--dry-run", action="store_true",
+                   help="commit the fixes in a throwaway clone and save them as patches; push nothing, open no PRs")
+    x.set_defaults(func=_cmd_fix)
 
     args = parser.parse_args(argv)
     try:

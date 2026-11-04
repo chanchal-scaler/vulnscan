@@ -234,19 +234,23 @@ def triage(findings, repo, stacks, run_dir, model=None, max_items=400):
     return {"summary": summary, "additional_findings": additional}, meta
 
 
-def _run_claude(prompt, repo, run_dir, model, output_name):
-    """Run one Claude review. Returns (structured_output, cost_usd)."""
+def _run_claude(prompt, repo, run_dir, model, output_name, schema=SCHEMA, tools="Read,Grep,Glob"):
+    """Run one headless Claude call (read-only unless tools grants Edit/Write). Returns (structured_output, cost_usd)."""
     claude = shutil.which("claude")
     if not claude:
         raise TriageError("claude CLI not found on PATH")
 
     cmd = [
         claude, "-p", "--restricted", "--strict-mcp-config",
-        "--tools", "Read,Grep,Glob",
+        "--tools", tools,
         "--add-dir", str(repo),
         "--output-format", "json",
-        "--json-schema", json.dumps(SCHEMA),
+        "--json-schema", json.dumps(schema),
     ]
+    if "Edit" in tools.split(","):
+        # Only the fix stage: edits are accepted inside the working directories, while
+        # --restricted still refuses writes to git, settings and tool-configuration files.
+        cmd += ["--permission-mode", "acceptEdits"]
     if model:
         cmd += ["--model", model]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_TOKEN", "GH_TOKEN"))}
