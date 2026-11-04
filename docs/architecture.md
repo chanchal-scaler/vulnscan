@@ -298,6 +298,7 @@ Why the socket works for validate: the repo copy Strix tests lives in the run fo
    - **Port:** it's published on the host's loopback only, and Session Manager port forwarding connects there.
    - **Restarts:** Docker starts at boot, and `--restart unless-stopped` brings the container back after a Spot stop.
 6. Prune images and build cache.
+7. Reinstall itself from `deploy/host/vulnscan-build`. It installs to a temporary name and renames it, so the running copy is untouched; the new copy runs from the next time. First boot writes the script only once, so before this step existed, changes to it never reached the instance.
 
 `/etc/vulnscan/config` is written at first boot and holds `AWS_REGION`, `SSM_PREFIX`, `VULNSCAN_GITHUB_ORG`, `VULNSCAN_SOURCE_REPO` and `VULNSCAN_SOURCE_REF`.
 

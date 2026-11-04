@@ -35,7 +35,7 @@ It runs as a proof of concept on one EC2 Spot instance in a staging AWS account,
 
 1. Edit and test locally ([docs/testing.md](docs/testing.md)).
 2. The owner pushes to `main` on GitHub.
-3. On the instance, `vulnscan-build` clones `main`, rebuilds the Docker image, and reinstalls the `vulnscan` wrapper from `deploy/host/`.
+3. On the instance, `vulnscan-build` clones `main` and rebuilds the Docker image. It restarts the dashboard container and reinstalls the `vulnscan` wrapper and itself from `deploy/host/`. A change to `vulnscan-build` takes effect from the run after the one that installs it.
 4. Terraform changes are planned and, after the owner approves, applied from the operator's machine. Its state is local there.
 
 The first-boot script (`user_data.sh.tftpl`) only runs when an instance is created. Changes to it need `terraform apply -replace=aws_instance.this`, which keeps the reports volume.

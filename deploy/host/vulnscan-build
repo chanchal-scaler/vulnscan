@@ -46,3 +46,9 @@ docker run -d --name vulnscan-dashboard --restart unless-stopped --init \
 
 docker image prune -f
 docker builder prune -f
+
+# Keep this script itself current too: first boot installs it once, and changes to it
+# otherwise never reach the instance. A rename, so this running copy is left untouched;
+# the new one takes effect from the next run.
+install -m 755 "$src/deploy/host/vulnscan-build" /usr/local/bin/vulnscan-build.new
+mv -f /usr/local/bin/vulnscan-build.new /usr/local/bin/vulnscan-build

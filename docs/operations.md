@@ -42,7 +42,13 @@ git -C /opt/vulnscan-src log --oneline -1
 docker image inspect vulnscan:latest --format '{{.Created}}'
 ```
 
-The image only changes when `Dockerfile`, `pyproject.toml` or `vulnscan/` change. Changes elsewhere (docs, `deploy/`) still need `vulnscan-build` to install the new wrapper.
+The image only changes when `Dockerfile`, `pyproject.toml` or `vulnscan/` change. Changes elsewhere (docs, `deploy/`) still need `vulnscan-build` to install the new wrapper. `vulnscan-build` also reinstalls itself, and the new copy runs from the next time, so run it twice after changing it.
+
+An instance whose `vulnscan-build` predates the self-reinstall (`grep -c vulnscan-build.new /usr/local/bin/vulnscan-build` prints 0) needs one manual install after the build fetches the new source:
+
+```bash
+vulnscan-build && install -m 755 /opt/vulnscan-src/deploy/host/vulnscan-build /usr/local/bin/vulnscan-build && vulnscan-build
+```
 
 ## Run a scan
 
