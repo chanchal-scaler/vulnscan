@@ -13,6 +13,7 @@ ARG CHECKOV_VERSION=3.4.3
 ARG BANDIT_VERSION=1.9.4
 ARG BRAKEMAN_VERSION=8.1.0
 ARG STRIX_VERSION=1.7.0
+ARG DOCKER_CLI_VERSION=29.9.2
 
 # apt over HTTPS: the EC2 instance only allows outbound 443.
 RUN sed -i 's#http://deb.debian.org#https://deb.debian.org#g' /etc/apt/sources.list.d/debian.sources \
@@ -27,12 +28,14 @@ RUN set -eu; \
              claude_platform=linux-x64; claude_sha=86dc1fcc69498159eaf15f446613e847010f9036bfbbdffd4c49350be8489ada; \
              osv_sha=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b; \
              gitleaks_arch=x64; gitleaks_sha=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb; \
-             gosec_sha=3fcce2c4e802ff4169217874602a7df355e9a37bcb6ffaa34b08f3d5f336cdfb ;; \
+             gosec_sha=3fcce2c4e802ff4169217874602a7df355e9a37bcb6ffaa34b08f3d5f336cdfb; \
+             docker_arch=x86_64; docker_sha=9ac225999fd5e863f7694c728ef23d480616b1e5639328fa309befd4243d69eb ;; \
       arm64) go_sha=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49; \
              claude_platform=linux-arm64; claude_sha=2e2496c9a8065df93acb0fca2d341f59a6b8777649b2e025ab8c9bcd5eef61f3; \
              osv_sha=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7; \
              gitleaks_arch=arm64; gitleaks_sha=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080; \
-             gosec_sha=0867994920453070a5d6a713e35921a3058473e5c3bf777fdd5a2d6f95313fda ;; \
+             gosec_sha=0867994920453070a5d6a713e35921a3058473e5c3bf777fdd5a2d6f95313fda; \
+             docker_arch=aarch64; docker_sha=873b3e0207857c3b2f28392fb922f3ea6efe37620c16d4d4aaf2fef409c90b73 ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     fetch() { curl -fsSL -o "$1" "$2"; echo "$3  $1" | sha256sum -c -; }; \
@@ -45,7 +48,11 @@ RUN set -eu; \
     tar -C /usr/local/bin -xzf gitleaks.tgz gitleaks; \
     fetch gosec.tgz "https://github.com/securego/gosec/releases/download/v${GOSEC_VERSION}/gosec_${GOSEC_VERSION}_linux_${arch}.tar.gz" "$gosec_sha"; \
     tar -C /usr/local/bin -xzf gosec.tgz gosec; \
-    chmod 755 /usr/local/bin/claude /usr/local/bin/osv-scanner /usr/local/bin/gitleaks /usr/local/bin/gosec; \
+    # Only the docker CLI, no daemon: Strix (stage 2) refuses to start without it on PATH,
+    # then talks to the host daemon through the socket the wrapper mounts for validate.
+    fetch docker.tgz "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" "$docker_sha"; \
+    tar -C /usr/local/bin -xzf docker.tgz --strip-components=1 docker/docker; \
+    chmod 755 /usr/local/bin/claude /usr/local/bin/osv-scanner /usr/local/bin/gitleaks /usr/local/bin/gosec /usr/local/bin/docker; \
     rm -f /tmp/*.tgz
 
 # Each Python scanner gets its own virtualenv so their dependencies can't conflict.

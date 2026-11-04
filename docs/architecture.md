@@ -199,6 +199,7 @@ On the instance, the repo copy Strix tests (`strix-target/`) is placed inside th
   | osv-scanner | 2.7.0 |
   | gitleaks | 8.30.1 |
   | gosec | 2.30.0 |
+  | docker CLI | 29.9.2 (only the client from the static tarball; Strix refuses to start without it on `PATH`) |
 
 - **Python tools,** pinned, each in its own virtualenv under `/opt/tools`: semgrep 1.183.0, checkov 3.4.3, bandit 1.9.4, and strix-agent 1.7.0 (stage 2; console script `strix`).
 - **Ruby:** brakeman 8.1.0 (gem).

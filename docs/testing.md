@@ -111,7 +111,7 @@ On 2026-11-04 the deliberately vulnerable sample app took 4 min 46 s in total (3
 ```bash
 docker build -t vulnscan:test .                                   # native architecture
 docker build --platform linux/amd64 -t vulnscan:test-amd64 .      # the instance's architecture (t3); emulated on Apple Silicon
-docker run --rm --entrypoint sh vulnscan:test -c 'semgrep --version; brakeman --version; gosec -version; claude --version; go version; strix --help >/dev/null && echo strix-ok'
+docker run --rm --entrypoint sh vulnscan:test -c 'semgrep --version; brakeman --version; gosec -version; claude --version; go version; docker --version; strix --help >/dev/null && echo strix-ok'
 docker run --rm --init --cap-drop ALL --security-opt no-new-privileges --memory 4g \
   -e VULNSCAN_GITHUB_ORG=OWASP vulnscan:test scan OWASP/railsgoat --no-llm
 ```
