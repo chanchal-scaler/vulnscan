@@ -128,7 +128,7 @@ vulnscan fix your-org/repo --only V003     # just one validated finding (repeat 
 vulnscan fix your-org/repo --ref release-2026-11 --model opus --run ~/.vulnscan/scans/your-org__repo/20261104-114804
 ```
 
-The GitHub token must be able to push branches and open PRs: a classic PAT with `repo` scope, or a fine-grained token with Contents and Pull requests set to read and write. On the instance the wrapper passes the same two tokens as for `scan`, and nothing else.
+The GitHub token must be able to push branches and open PRs: a classic PAT with `repo` and `workflow` scopes, or a fine-grained token with Contents, Pull requests and Workflows set to read and write. Without `workflow`, GitHub rejects the push of any fix that changes a file under `.github/workflows/`. On the instance the wrapper passes the same two tokens as for `scan`, and nothing else.
 
 ## Dashboard
 
@@ -215,7 +215,7 @@ Exit codes:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GITHUB_TOKEN` | none | Token that can read the repos. A classic PAT with `repo` scope covers every org its user can read; a fine-grained or GitHub App token with read-only Contents covers one owner. `vulnscan fix` also needs write access to Contents and Pull requests. Passed to git through the environment, never written to `.git/config`. |
+| `GITHUB_TOKEN` | none | Token that can read the repos. A classic PAT with `repo` scope covers every org its user can read; a fine-grained or GitHub App token with read-only Contents covers one owner. `vulnscan fix` also needs write access to Contents and Pull requests, plus the `workflow` scope (fine-grained: Workflows) to push fixes to GitHub Actions workflows. Passed to git through the environment, never written to `.git/config`. |
 | `GITHUB_TOKEN_<ORG>` | none | Per-org token, used instead of `GITHUB_TOKEN` for that org's repos. The name is the org in upper case with `-` changed to `_`, e.g. `GITHUB_TOKEN_SCALER_HQ`. |
 | `VULNSCAN_GITHUB_ORG` | none (any owner) | Comma-separated orgs whose repos may be scanned; anything else is refused. Not case-sensitive. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | none | Claude authentication on a server (`claude setup-token`). Not needed where Claude Code is already signed in. |

@@ -102,7 +102,7 @@ vulnscan fix scaler-hq/<repo> --run /var/lib/vulnscan/scans/scaler-hq__<repo>/<t
 - Every PR is a draft and **untested**. Claude can't run the repo's code or tests, so whoever owns the code reviews and tests it before merging.
 - Re-running is safe. Findings whose branch already exists are skipped. To retry one, close its PR, delete its branch on GitHub, and run with `--only <V id>`.
 - `fix.md` and `fix.json` keep earlier fix runs' results on the same scan, so `--only` and re-runs never lose a PR link. The PRs themselves are on GitHub: `gh pr list --repo scaler-hq/<repo> --search "[vulnscan] in:title"`.
-- Public repos are refused. It needs no image rebuild beyond `vulnscan-build` and no new token: it uses the same GitHub PAT, which has `repo` scope.
+- Public repos are refused. It needs no image rebuild beyond `vulnscan-build` and no new token: it uses the same GitHub PAT, which has the `repo` and `workflow` scopes.
 
 ## View the dashboard
 
@@ -214,7 +214,7 @@ For the Claude token, the value should start with `sk-ant-oat` and must not be `
 
 ## Rotate a token (change)
 
-1. Create the new token. For GitHub: a classic PAT with `repo` scope, authorised for SSO on each org. For Claude: run `claude setup-token`.
+1. Create the new token. For GitHub: a classic PAT with `repo` and `workflow` scopes, authorised for SSO on each org. For Claude: run `claude setup-token`.
 2. Store it:
    ```bash
    read -rs V && aws ssm put-parameter --overwrite --name /vulnscan/<github-token|claude-token> --value "$V"; unset V
@@ -252,6 +252,7 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `fix`: `no validated scan for <repo>` | No run folder has a `validation.json` | Run `vulnscan validate` first, or pass `--run <folder>` |
 | `fix`: `<repo> is public` | PRs would disclose the vulnerability | Expected. Use `--dry-run` and fix it through a private security advisory |
 | `fix`: `git push failed … 403` or `GitHub API POST …/pulls: HTTP 403/404` | The token can't push to or open PRs on that repo (read-only fine-grained token, missing SSO authorisation, or a push ruleset) | Check the token's scopes and SSO; for a ruleset (e.g. one restricting commit emails), ask the repo admins |
+| `fix`: `git push failed … refusing to allow a Personal Access Token to create or update workflow … without workflow scope` | The fix changes a file under `.github/workflows/`, and the token has no `workflow` scope (e.g. a rotated token created with `repo` only) | Add the `workflow` scope on the token's page (a classic PAT keeps its value, so Parameter Store needs no change), then re-run with `--only <V id>`. The commit is also in `<run>/fix/<V id>.patch` |
 | `fix`: `HTTP 422 … Draft pull requests are not supported` | Draft PRs need a paid plan on private repos | Not handled; the branch is pushed, so open the PR from it by hand |
 | `fix`: a finding is `skipped: branch already exists` | An earlier `fix` run already handled it | Expected. Delete the branch to retry |
 | Dashboard port forwarding: `Connection to destination port failed` | The `vulnscan-dashboard` container isn't running, e.g. the image predates the dashboard | On the instance: `docker ps -a --filter name=vulnscan-dashboard` and `docker logs vulnscan-dashboard`. `vulnscan-build` recreates it. |

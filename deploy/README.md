@@ -70,9 +70,9 @@ read -rs OR && aws ssm put-parameter --region <region> --overwrite \
   --name /vulnscan/openrouter-token --value "$OR"; unset OR
 ```
 
-- **`github-token`**: a classic personal access token with the `repo` scope, from a user who can read every org in `github_org`. Used by `vulnscan scan`.
+- **`github-token`**: a classic personal access token with the `repo` and `workflow` scopes, from a user who can read every org in `github_org`. Used by `vulnscan scan`. `vulnscan fix` needs `workflow` to push fixes to files under `.github/workflows/`.
   - If an org uses SAML single sign-on, authorize the token for it (*Configure SSO* on the token's page).
-  - `repo` also allows pushing to those repos, so give the token an expiry, and revoke it if the instance is ever suspected compromised.
+  - `repo` and `workflow` also allow pushing code and workflow changes to those repos, so give the token an expiry, and revoke it if the instance is ever suspected compromised.
 - **`source-token`** (only if the vulnscan repo is private): a fine-grained token with read-only Contents on the vulnscan repo only. Used by `vulnscan-build`. It's separate because a fine-grained token can only reach one owner's repos.
 - **`claude-token`**: the output of `claude setup-token`.
 - **`openrouter-token`**: an OpenRouter API key (`sk-or-…`, [openrouter.ai/keys](https://openrouter.ai/keys)), used only by `vulnscan validate` as `LLM_API_KEY` for GLM 5.3. `vulnscan scan` doesn't read it.

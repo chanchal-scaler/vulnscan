@@ -82,7 +82,8 @@ caller, environment and deployment working matter equally.
 5. If you can't fix it safely, change nothing and set fixed to false.
 
 Return:
-- fixed: true only if you changed files and they fix the issue
+- fixed: true only if you changed files and they fix the issue. For a committed or hardcoded secret, the change in
+  step 4 counts, with rotation in before_merging
 - breaking: true if merging the change could break any caller, user, environment or deployment that works today
 - before_merging: each step someone must complete before merging is safe, as a short concrete instruction, e.g.
   "Set PAYMENT_API_KEY in every environment", "Rotate the leaked key", "Confirm no client calls POST /internal/x";
