@@ -125,7 +125,8 @@ def _run_data(run_dir):
     for v in data["v"]:
         for sid in v.get("validates") or []:
             validated_by.setdefault(sid, []).append(v.get("id"))
-    not_referenced = set(((validation or {}).get("coverage") or {}).get("not_referenced") or [])
+    coverage = (validation or {}).get("coverage") or {}
+    not_referenced, sent = set(coverage.get("not_referenced") or []), set(coverage.get("sent") or [])
 
     # Claude's own findings are numbered in list order, as in report.csv and validate.py (whose ids Strix names).
     rows = [{"id": f"C{i:02d}", "severity": a.get("severity"), "verdict": "found by Claude", "tool": "claude",
@@ -137,7 +138,12 @@ def _run_data(run_dir):
             data["dismissed"][verdict] += 1
             continue
         rows.append({"id": f.get("id"), "severity": t.get("severity") or f.get("severity"), "verdict": verdict,
-                     "tool": f.get("tool"), "title": f.get("title"), "location": _loc(f)})
+                     "tool": f.get("tool"), "title": f.get("title"), "location": _loc(f), "group": t.get("group")})
+    # validate sends a group Claude judged as one pattern once, through one of its hits.
+    sent_as = {}
+    for r in rows:
+        if r.get("group") and r["id"] in sent:
+            sent_as.setdefault(r["group"], r["id"])
     for r in rows:
         r["validated_by"] = validated_by.get(r["id"], [])
         if validation is None:
@@ -146,6 +152,8 @@ def _run_data(run_dir):
             r["strix"] = "validated"
         elif r["id"] in not_referenced:
             r["strix"] = "not validated"
+        elif r.get("group") in sent_as:
+            r["strix"] = f"grouped with {sent_as[r['group']]}, which was sent"
         else:
             r["strix"] = "not sent"  # beyond --max-validate, or not picked with --only
     rows.sort(key=lambda r: SEV_ORDER.get(r["severity"], 2))

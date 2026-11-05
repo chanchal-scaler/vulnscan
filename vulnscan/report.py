@@ -26,6 +26,24 @@ def _table(findings, extra_col=None):
     return "\n".join(rows)
 
 
+def _deep_line(deep):
+    """One line on what the deep review covered, e.g. 'SSRF: 3 of 3 batches over 61 call sites; ...'."""
+    parts = []
+    for key, name, count, unit in (("ssrf", "SSRF", "call_sites", "outbound HTTP call sites"),
+                                   ("access", "access control", "files", "request-handler files")):
+        m = deep[key]
+        text = f"{name}: {m['done']} of {m['batches']} batch(es) over {m[count]} {unit}"
+        if m["skipped"]:
+            text += f", {len(m['skipped'])} skipped (Claude budget reached)"
+        if m["failed"]:
+            text += f", {len(m['failed'])} failed"
+        parts.append(text)
+    line = "; ".join(parts)
+    if deep.get("paths"):
+        line += f" (limited to {', '.join(deep['paths'])})"
+    return line + f", ${deep['cost_usd']:.2f} at API rates"
+
+
 def _verdict(f):
     return (f.triage or {}).get("verdict")
 
@@ -96,6 +114,7 @@ def write_reports(run_dir, meta, findings, triage_result):
         triage_line += ")"
     for err in t.get("errors", []):
         triage_line += f"\n  - error: {_cell(err, 300)}"
+    deep = meta.get("deep_review")
 
     md = [
         f"# Security scan: {meta['repo']}",
@@ -104,10 +123,19 @@ def write_reports(run_dir, meta, findings, triage_result):
         f"- Commit: `{meta['commit'] or 'n/a'}`",
         f"- Stacks: {', '.join(f'{k} ({len(v)})' for k, v in meta['stacks'].items()) or 'none detected'}",
         f"- Claude triage: {triage_line}",
+        *([f"- Deep review: {_deep_line(deep)}"] if deep else []),
         "",
         "## Tools",
         *tools,
     ]
+    missed = [(name, label) for key, name in (("ssrf", "SSRF"), ("access", "access control")) if deep
+              for label in deep[key]["skipped"] + deep[key]["failed"]]
+    if missed:
+        md += ["", f"## Deep review: batches not reviewed ({len(missed)})",
+               "Skipped once the Claude budget was reached, or failed. The code they cover wasn't deep-reviewed.", ""]
+        md += [f"- {name}: {_cell(label, 200)}" for name, label in missed[:50]]
+        if len(missed) > 50:
+            md.append(f"- and {len(missed) - 50} more (see report.json)")
     if data["summary"]:
         md += ["", "## Summary", data["summary"]]
 
@@ -143,6 +171,8 @@ def write_reports(run_dir, meta, findings, triage_result):
                 f"- Details: {a['description']}",
                 f"- Fix: {a['fix']}",
             ]
+            if a.get("found_in"):
+                md.append(f"- Found in: {a['found_in']}")
 
     if review:
         md += ["", f"## Needs manual review ({len(review)})",

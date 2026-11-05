@@ -56,7 +56,10 @@ vulnscan-build && install -m 755 /opt/vulnscan-src/deploy/host/vulnscan-build /u
 vulnscan scan KingsGambitLab/<repo>                              # default branch
 VULNSCAN_TOOL_TIMEOUT=3600 vulnscan scan KingsGambitLab/<repo>   # big repos: give semgrep longer than 30 minutes
 vulnscan scan scaler-hq/<repo> --ref <branch> --max-triage 600   # other flags: see README
+vulnscan scan KingsGambitLab/<repo> --deep-review --deep-path app/controllers/api --claude-budget 20
 ```
+
+`--deep-review` adds Claude's whole-codebase SSRF and access-control review. It takes hours on a monolith and uses far more of the Claude plan's allowance, which the token owner shares, so narrow it with `--deep-path` and cap it with `--claude-budget`. The report's "Deep review" line and "batches not reviewed" section show what it covered. Because the scan runs in a detached container, the session ending doesn't stop it.
 
 - The wrapper prints `running in container <id>` and streams the progress.
 - **Ctrl-C** stops following the output, not the scan.
@@ -240,7 +243,7 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `semgrep: failed: … timed out after 1800 seconds` | Large repo | Re-run with `VULNSCAN_TOOL_TIMEOUT=3600` or more. |
 | `git clone failed: could not read Username` | The token is missing, wrong, expired or not SSO-authorised for that org; or the repo name is wrong | Check the token (above). Authorise it for SSO on GitHub. |
 | `… is outside the allowed orgs` (exit 2) | The repo's owner isn't in `VULNSCAN_GITHUB_ORG` | Expected. To allow another org, **(change)** edit `/etc/vulnscan/config`, and `github_org` in `terraform.tfvars` to match. |
-| Report says `Claude triage: partial` or `failed` | A batch timed out, hit usage limits, or returned no structured output | Look at `errors` in `report.json` and at `claude-<n>.json`. Re-run later, or raise `VULNSCAN_TRIAGE_TIMEOUT`. |
+| Report says `Claude triage: partial` or `failed` | A batch or the review timed out, hit usage limits, or returned no structured output, or Claude left some items without a verdict ("no verdict for …") | Look at `errors` in `report.json` and at `claude-<n>.json` or `claude-review.json`. Re-run later, or raise `VULNSCAN_TRIAGE_TIMEOUT`. |
 | `gosec: failed: produced no report` (local runs) | The Go toolchain isn't installed | Install Go. The image includes it. |
 | `validate`: `/vulnscan/openrouter-token is still the placeholder` | The third parameter hasn't been set | Set it ([deploy/README.md](../deploy/README.md#add-the-tokens)) and re-run |
 | `validate`: `strix CLI not found on PATH` | The image predates stage 2 | Run `vulnscan-build`, then retry |

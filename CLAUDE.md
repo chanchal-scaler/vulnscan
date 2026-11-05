@@ -1,9 +1,9 @@
 # vulnscan: guide for agents
 
 vulnscan is a Python CLI that scans one GitHub repo for security issues:
-- It detects the repo's stacks and runs the scanners that fit (semgrep, osv-scanner, gitleaks, checkov, brakeman, bandit, gosec).
+- It detects the repo's stacks and runs the scanners that fit (semgrep, osv-scanner, gitleaks, checkov, brakeman, bandit, gosec), plus its own built-in check for prompt injection planted in the repo.
 - It merges their output into one finding format.
-- It uses Claude Code (headless, read-only) to verify the findings and look for issues scanners miss.
+- It uses Claude Code (headless, read-only) to verify the findings and look for issues scanners miss. With `--deep-review` (opt-in, costly in quota), Claude also checks every outbound HTTP call for SSRF and every request handler for access control, in batches vulnscan decides. `--claude-budget` caps a scan's Claude usage.
 - `vulnscan validate` (stage 2) re-checks a scan's open findings with Strix, whose agents run in Strix's own Docker sandbox and report only findings with a working PoC; its LLM is GLM 5.3 via OpenRouter.
 - `vulnscan fix` (stage 3) has Claude Code fix each Strix-validated finding in a throwaway clone, then opens one draft PR per finding.
 - It writes `report.md`, `report.json` and `report.csv` (plus `validation.*` after stage 2 and `fix.*` after stage 3).
@@ -56,7 +56,9 @@ AWS_PROFILE=<profile> terraform plan                   # read-only; profile is i
 
 ## Invariants: don't break these
 
-- **Scanners never get secrets.** They run with `config.scanner_env()`, an allowlist of environment variables.
+- **Scanners never get secrets.** They run with `config.scanner_env()`, an allowlist of environment variables. The built-in prompt-injection check (`tools/prompt_injection.py`) is our own code and runs in-process, but only reads files.
+- **The scanned repo can't switch off its own findings.** Scanners ignore its suppression comments and config (`nosemgrep`, `# nosec` and `.bandit`, `gitleaks:allow` and `.gitleaks.toml`, `config/brakeman.yml`), and report what its ignore files hide (`config/brakeman.ignore`, `checkov:skip`). Where no flag exists (`.gitleaksignore`, `.checkov.yaml`), the file itself becomes a finding. Claude treats a suppression as the repo's claim, not proof.
+- **Never copy a secret's value into Claude's output.** Every prompt says so: report.md, report.csv, the dashboard and PRs quote what Claude writes.
 - **Claude runs restricted.** It runs as `claude -p --restricted --strict-mcp-config --tools Read,Grep,Glob`, with the run folder (not the repo) as its working directory, so the repo's `.claude/` settings and hooks never load. Every `GITHUB_TOKEN*` and `GH_TOKEN*` variable is removed from its environment. **Exception:** `vulnscan fix` adds `Edit,Write` and `--permission-mode acceptEdits`, on a throwaway clone, and still gives Claude no shell, web or MCP and no token. `--restricted` still refuses writes to `.git` and settings files. vulnscan, not Claude, commits, pushes and opens the PR.
 - **`vulnscan fix` opens draft PRs only, never on public repos** (a branch would disclose the vulnerability before the fix is merged), and never runs git hooks (`core.hooksPath=/dev/null`). The PR body has Claude's reproduction steps, with placeholders for hosts, credentials and secret values. Strix's raw PoC stays out, because it can carry operator-supplied credentials or live URLs.
 - **The scanned repo's code and dependencies are never run or installed** in the vulnscan process or its container. No `bundle install` or `npm install`. The one deliberate exception: stage-2 validation, where Strix runs the code inside **Strix's own Docker sandbox** — never in the vulnscan container — against a throwaway clone or copy (Strix mounts targets writable).

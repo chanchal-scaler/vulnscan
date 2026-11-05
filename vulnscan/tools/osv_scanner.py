@@ -1,16 +1,26 @@
+import re
+
 from ..findings import Finding, normalize_severity, rel_path, severity_from_cvss
 from .base import Tool
 
 
-def _fixed_version(vuln, package):
-    for affected in vuln.get("affected") or []:
-        if (affected.get("package") or {}).get("name") != package:
-            continue
-        for rng in affected.get("ranges") or []:
-            for event in rng.get("events") or []:
-                if "fixed" in event:
-                    return event["fixed"]
-    return None
+def _version_key(version):
+    # Rough, but enough to compare release lines: "6.1.6.1" -> (6, 1, 6, 1). Pre-release tags aren't ordered.
+    return tuple(int(n) for n in re.findall(r"\d+", str(version or "")))
+
+
+def _fixed_version(vuln, package, installed):
+    """The lowest fixed version above the installed one: an advisory often has one fix per release line
+    (5.2.8.1, 6.0.5.1, 6.1.6.1, ...), and the first listed may be for another line."""
+    fixed = [event["fixed"]
+             for affected in vuln.get("affected") or [] if (affected.get("package") or {}).get("name") == package
+             for rng in affected.get("ranges") or [] if rng.get("type") != "GIT"  # GIT ranges give commit hashes
+             for event in rng.get("events") or [] if "fixed" in event]
+    current = _version_key(installed)
+    if not fixed or not current:
+        return fixed[0] if fixed else None
+    later = [v for v in fixed if _version_key(v) > current]
+    return min(later, key=_version_key) if later else None
 
 
 class OsvScanner(Tool):
@@ -52,7 +62,7 @@ class OsvScanner(Tool):
                         description=(vuln.get("details") or "")[:1000],
                         package=p.get("name"),
                         version=p.get("version"),
-                        fixed_version=_fixed_version(vuln, p.get("name")),
+                        fixed_version=_fixed_version(vuln, p.get("name"), p.get("version")),
                         references=[f"https://osv.dev/vulnerability/{ids[0]}"],
                     ))
         return out

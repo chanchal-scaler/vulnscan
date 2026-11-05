@@ -5,6 +5,7 @@ from .checkov import Checkov
 from .gitleaks import Gitleaks
 from .gosec import Gosec
 from .osv_scanner import OsvScanner
+from .prompt_injection import PromptInjection
 from .semgrep import Semgrep
 
 ALL_TOOLS = [
@@ -12,6 +13,7 @@ ALL_TOOLS = [
     Semgrep(),
     OsvScanner(),
     Gitleaks(),
+    PromptInjection(),  # built in
     # Stack-specific
     Checkov(),
     Brakeman(),

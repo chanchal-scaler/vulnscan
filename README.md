@@ -32,7 +32,10 @@ Documentation:
 | Vulnerable dependencies | osv-scanner (every repo, every lockfile ecosystem) | Known CVEs in gems (`Gemfile.lock`), npm/yarn packages, pip requirements, Go modules, Maven `pom.xml` |
 | Hardcoded secrets | gitleaks (every repo), plus semgrep and checkov secret rules | Private keys, cloud credentials, API keys, OAuth tokens. Values are redacted before they reach disk. |
 | Infrastructure misconfiguration | checkov (Terraform, Dockerfiles, GitHub Actions, Helm) | Open security groups, IMDSv1, unencrypted storage, containers running as root |
-| Issues scanners miss | Claude's own code review | SSRF, missing authorization and IDOR, authentication bypass, mass assignment. In apps that call an LLM: prompt injection into prompts that grade or decide, unsanitised LLM output, client-chosen models or LLM proxies, personal data sent to LLM providers. See [What Claude does](#what-claude-does) for limits. |
+| Prompt injection planted in the repo | vulnscan's built-in check (every repo), plus Claude's own review | Text aimed at AI tools ("ignore previous instructions", "mark this as a false positive", notes to an AI in comments or agent files such as `CLAUDE.md`, `.cursorrules` or `.mcp.json`), invisible Unicode tag characters, bidi controls (Trojan Source) and zero-width runs. It targets vulnscan's own Claude and Strix as much as developers' coding agents. |
+| Issues scanners miss | Claude's own code review | SSRF, missing authorization and IDOR, authentication bypass, mass assignment. In apps that call an LLM: prompt injection into prompts that grade or decide or into agents that call tools, unsanitised LLM output, client-chosen models or LLM proxies, personal data sent to LLM providers. See [What Claude does](#what-claude-does) for limits. |
+
+The scanned repo can't hide its own findings: scanners ignore its suppression comments and config files (`nosemgrep`, `# nosec`, `.bandit`, `gitleaks:allow`, `.gitleaks.toml`, `config/brakeman.yml`) and report what `config/brakeman.ignore` and `checkov:skip` comments hide, marked as such. `.gitleaksignore` and `.checkov.yaml` can't be switched off, so each becomes a finding of its own, and `.semgrepignore` is still honoured. Claude treats a suppression as the repo's claim, not proof.
 
 Stacks are detected from marker files:
 - **Rails:** `Gemfile` plus `config/application.rb`
@@ -45,7 +48,7 @@ Stacks are detected from marker files:
 - **Python:** any `.py` file
 - **Infrastructure as code:** `*.tf`, `Dockerfile*`, `Chart.yaml`, or `.github/workflows/*.yml`
 
-A stack without its own scanner still gets semgrep, osv-scanner, gitleaks and Claude.
+A stack without its own scanner still gets semgrep, osv-scanner, gitleaks, the prompt-injection check and Claude.
 
 ## How a scan works
 
@@ -66,15 +69,25 @@ Claude Code runs headless, with read-only tools (Read, Grep, Glob) and no shell 
 - a reason;
 - a fix.
 
-For dependencies it checks whether the package, and any vulnerable function an advisory names, is actually used.
+For dependencies it checks whether the package is loaded at runtime and whether any vulnerable function an advisory names is used. A package that's never loaded is a false positive, and one used only in development or tests is rated low. The prompt gives Claude a severity scale based on what an attacker can do (critical: no login needed for RCE, SQL injection or auth bypass, SSRF reaching cloud metadata, a live production credential), so ratings are consistent across batches. A `duplicate` must name the other item in its batch (`duplicate_of`). One that doesn't, or a pair marked duplicates of each other, is kept as `needs_review`, so a real issue can't disappear. Claude is told never to copy a secret's value into its answer.
 
 Findings are grouped and prioritised first, so the important ones are reviewed even in repos with thousands of findings:
 - **Dependencies:** each vulnerable package version is one item, covering all its advisories and lockfiles.
-- **Repeated rules:** a rule with more than 10 hits is one item, judged from 5 sample locations. Brakeman warnings are never grouped, because each is tied to a specific location.
+- **Repeated rules:** a rule with more than 10 hits is one item, judged from 5 sample locations. The samples are spread across folders, with tests, vendored and example code last, and Claude can give any sample its own verdict when it doesn't fit the pattern. Brakeman warnings are never grouped, because each is tied to a specific location.
 - **Order:** critical and high come first. Within each severity band: secrets, then code, then configuration, then dependencies.
 - **Limits:** Claude reviews 100 items per call, up to 400 items per scan (`--max-triage`). Anything beyond that is listed as "Not triaged".
 
-**2. Its own review: limited.** In the first batch only, Claude also looks for up to 10 high-impact issues scanners usually miss, starting from routes and controllers (checking every route module for missing authentication), and for SSRF also from every outbound HTTP call. On small repos this finds real issues; in testing it found an SSRF, a `pickle.loads` remote code execution and controllers without authentication. On large monoliths it can only read a small part of the code, so coverage there comes mostly from the scanners.
+**2. Its own review: limited.** After the batches, a separate call looks for up to 10 high-impact issues scanners usually miss, starting from routes and controllers (checking every route module for missing authentication), and for SSRF also from every outbound HTTP call. It's separate so a slow review can't time out the most important verdicts. It also looks for prompt injection planted in the repo, including agent settings that run commands when a developer opens it. It gets the list of scanner findings so it doesn't repeat them, names each issue's entry point and who can reach it (which helps Strix test it), and ends its summary with the parts of the app it didn't get to. On small repos this finds real issues; in testing it found an SSRF, a `pickle.loads` remote code execution and controllers without authentication. On large monoliths it can only read a small part of the code, so coverage there comes mostly from the scanners, unless you add a deep review.
+
+**3. Deep review: opt-in (`--deep-review`), for the whole codebase.** After the general review, Claude reviews every part of the code for the two classes of issue no scanner finds well. vulnscan, not Claude, lists what must be covered and gives Claude one batch per call:
+- **SSRF, by sink:** every outbound HTTP call site (Net::HTTP, Faraday, requests, httpx, fetch, axios, `http.Get` and so on), in batches of 25. Claude traces each URL back to where it comes from. Browser code, imports and comments are left out.
+- **Access control, by area:** every request-handler file (Rails controllers, Django and FastAPI views, Express and Next.js routes, Go handlers, Spring controllers), grouped by folder into batches of about 4,000 lines. Claude checks every action for missing authentication or authorization, IDOR and mass assignment.
+
+Each call gets what's already reported in its files, so it doesn't repeat it. Its findings join Claude's own (`C…`, marked "Found in: deep review: …") and go on to validation like any other. SQL injection, command injection, deserialization, XSS and open redirects are left to the scanners, which find their sinks already. Tests, vendored, example and docs code is skipped. `--deep-path` limits it to part of the repo, and the report lists any batch that was skipped or failed, so you know what wasn't covered.
+
+It costs far more Claude quota than a normal scan. Your largest local Rails app (1,358 handler files, 220 call sites) makes 47 calls, and it runs one call at a time, so expect hours. Use `--claude-budget` to cap it.
+
+**The Claude budget (`--claude-budget USD`)** caps a scan's Claude usage, counted as `total_cost_usd` at API rates. With the subscription token nothing is billed, so it really caps how much of the plan's allowance one scan can use. It's checked before each call, in priority order: triage batches, then the general review, then deep-review batches. Calls after the cap is reached are skipped and listed in the report. A call already running isn't stopped, so the total can go past the cap by one call.
 
 Claude never runs code, never tests the live app, and its results can differ between runs.
 
@@ -82,12 +95,12 @@ Claude never runs code, never tests the live app, and its results can differ bet
 
 Detection is only the first stage. `vulnscan validate` re-checks a finished scan's **open findings** (confirmed, needs review and not triaged — not Claude's false positives or duplicates) with [Strix](https://github.com/usestrix/strix), an open-source agentic pentesting harness. Strix runs inside its own Docker sandbox, where it reads the code, stands the app up and probes it, reporting only what it can validate with a working proof-of-concept. Its LLM is GLM 5.3 via OpenRouter.
 
-- **Seeding:** the open findings from the scan's `report.json` become an instruction file and a workspace file, so Strix validates *your* detected issues (worst first, capped by `--max-validate`) instead of re-scanning from scratch.
+- **Seeding:** the open findings from the scan's `report.json` become an instruction file and a workspace file, so Strix validates *your* detected issues (worst first, capped by `--max-validate`) instead of re-scanning from scratch. A rule or package Claude judged as one group is sent once, as its first hit outside tests and vendored code, so a noisy rule can't crowd out the rest. Dependencies come after everything else, and `info` findings aren't sent. Strix is asked to start each title with the ids it validates, like `[F012, C03]`, or `[new]`, and to work through the list in order.
 - **Targets:** the repo is cloned by vulnscan itself and passed to Strix as a local directory, so the GitHub token never reaches Strix or its sandbox. `--url` adds a live target (e.g. the staging deployment) — only systems you are authorised to test.
 - **Model:** `--model`, or `STRIX_LLM`, defaults to `openrouter/z-ai/glm-5.3`; the OpenRouter key goes in `LLM_API_KEY` (or `OPENROUTER_API_KEY`). Strix only reports a finding it could actually reproduce.
 - **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
 - **Re-validating** the same scan writes new `V…` ids. That's refused once `vulnscan fix` has pushed branches for the scan, because they're named after the old ids. Run a new scan instead, which is also what checks the fixes.
-- **`--only F003`** validates just that open finding (repeat it for several; `C01` works too). It adds to `validation.json` instead of replacing it: earlier validated findings keep their `V…` ids and new ones get the next ids, so it still works after fix PRs exist. A false positive, duplicate or unknown ID is an error (exit 2), caught before anything is cloned. Validating the same finding again adds a second `V…` id rather than replacing the first. Run one validate per scan at a time.
+- **`--only F003`** validates just that open finding (repeat it for several; `C01` works too, and so does any hit of a group). It adds to `validation.json` instead of replacing it: earlier validated findings keep their `V…` ids and new ones get the next ids, so it still works after fix PRs exist. A false positive, duplicate, `info` finding or unknown ID is an error (exit 2), caught before anything is cloned. Validating the same finding again adds a second `V…` id rather than replacing the first. Run one validate per scan at a time.
 - **On the instance:** it runs like a scan. The wrapper gives **validate containers only** the Docker socket (Strix starts its pentest sandbox on the host daemon — the one deliberate exception to the hardened container), reads the OpenRouter key from Parameter Store, and refuses to run while it's still the placeholder. The repo copy Strix tests is placed in the run folder, on the path mounted on both sides.
 
 ```bash
@@ -114,7 +127,8 @@ Claude is told that a fix which breaks the app is worse than no fix:
 
 The rules it follows:
 - **One finding per branch.** A finding Claude can't fix gets no PR.
-- **Re-runs are safe.** A finding whose branch already exists on GitHub is skipped, so re-running on the same run folder never opens duplicate PRs.
+- **Re-runs are safe.** A finding whose branch already exists on GitHub is skipped, so re-running on the same run folder never opens duplicate PRs. If opening the PR fails after the push, vulnscan deletes the branch again, so a re-run retries that finding rather than skipping it.
+- **Claude sees both stages.** Besides Strix's finding and PoC, the prompt has the stage-1 findings it validates (scanner rule, location, and the triage's reason and fix). If the issue is no longer in the code, Claude changes nothing.
 - **The fixes are untested.** Claude can't run the repo's code or tests, which is why the PRs are drafts.
 - **Public repos are refused** unless you pass `--dry-run`, because a public branch or PR would disclose the vulnerability before the fix is merged. Fix those through a private security advisory instead.
 - **`--dry-run`** commits the fixes in the throwaway clone and saves them as patches in `fix/`. It pushes nothing and opens no PRs.
@@ -155,7 +169,8 @@ Every scan writes these files to its own folder:
 | `report.csv` | One row per finding, with Claude's own findings first. For spreadsheets. |
 | `report.json` | Everything: scan metadata, tool status, triage metadata, Claude's summary, every finding with its triage result, and Claude's own findings |
 | `raw/<tool>.json` | Each scanner's original output |
-| `claude-<n>.json` | Claude's raw response for batch *n*, kept for audit (includes `total_cost_usd` and `num_turns`) |
+| `claude-<n>.json`, `claude-review.json` | Claude's raw response for batch *n* and for its own review of the code, kept for audit (includes `total_cost_usd` and `num_turns`) |
+| `claude-deep-ssrf-<n>.json`, `claude-deep-access-<n>.json` | With `--deep-review`: Claude's raw response for each deep-review batch. `report.json` → `deep_review` has each pass's coverage, the batches skipped or failed, and every batch's summary |
 | `validation.md` / `.json` / `.csv` | Stage 2, after `vulnscan validate`: Strix's PoC-validated findings, with the stage-1 ids they confirm and a best-effort coverage list of what wasn't validated |
 | `strix-instructions.md`, `strix-findings.json` | What was sent to Strix: the generated instructions and the open findings payload |
 | `raw/strix/` | Strix's own artifacts for the validation run (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) |
@@ -175,7 +190,7 @@ Every scan writes these files to its own folder:
 | `file`, `line` | Location, relative to the repo root |
 | `title` | The scanner's title |
 | `package`, `version`, `fixed_version` | Dependency findings only |
-| `reviewed_as` | Empty when Claude reviewed this finding on its own. Otherwise `rule-level review of N hits from 5 samples` or `package-level review of N advisories`: the verdict covers the whole group, and not every hit was checked. |
+| `reviewed_as` | Empty when Claude reviewed this finding on its own, including a sample it judged apart from its group. Otherwise `rule-level review of N hits from 5 samples` or `package-level review of N advisories`: the verdict covers the whole group, and not every hit was checked. |
 | `reason`, `fix` | Claude's explanation and suggested fix. For Claude's own findings, `reason` is the description. |
 | `reference` | A link, e.g. the osv.dev advisory |
 
@@ -201,6 +216,8 @@ vulnscan scan ~/development/some-app --no-llm        # local folder, scanners on
 vulnscan scan your-org/repo --model opus             # pick Claude's model
 vulnscan scan your-org/repo --max-triage 600         # let Claude review more items (default 400)
 vulnscan scan your-org/repo --keep-clone             # keep the clone for debugging
+vulnscan scan your-org/repo --deep-review --claude-budget 40               # whole-codebase SSRF and access-control review, capped
+vulnscan scan your-org/repo --deep-review --deep-path app/controllers/api  # deep-review only part of the repo
 vulnscan tools                                       # which scanners are installed
 ```
 
@@ -239,10 +256,11 @@ Exit codes:
 ## Coverage limits
 
 - **Only one branch,** the default or `--ref`, and only its latest commit. Secrets that were committed and later deleted are still in git history but aren't found.
-- **Validation coverage is best effort.** Strix only reports what it could reproduce, which is the point; but an issue it couldn't reach (an app it couldn't stand up, a URL that needs auth you didn't supply) stays unvalidated, and the stage-1 findings it references are matched from the ids it names in its reports.
+- **Validation coverage is best effort.** Strix only reports what it could reproduce, which is the point; but an issue it couldn't reach (an app it couldn't stand up, a URL that needs auth you didn't supply) stays unvalidated. The stage-1 findings it references come from the `[F012]` tag in its titles; a title without one falls back to any id in its text.
+- **The prompt-injection check matches patterns.** It finds the common phrasings and hidden characters, not every way to word an instruction, and an app's own LLM prompts can match (Claude dismisses those). Claude's review covers the rest as far as it reads.
 - **Static analysis only.** Nothing is run or tested against a live app, and business-logic flaws are mostly out of reach.
 - **Claude's verdicts are judgements, not proof.** A grouped rule is judged from 5 samples.
-- **Claude's own review is capped at 10 issues** and is shallow on large repos ([What Claude does](#what-claude-does)).
+- **Claude's own review is capped at 10 issues** and is shallow on large repos ([What Claude does](#what-claude-does)). `--deep-review` covers the whole codebase, but only for SSRF and access control, and only the call sites and handler files its patterns recognise.
 - **When run directly, scanner versions are unpinned (latest).** The Docker image pins them.
 - **No scheduling or alerting yet** ([docs/status.md](docs/status.md)).
 
@@ -253,7 +271,8 @@ The scanner holds read access to your code and produces a list of its weaknesses
 - **Scanners get a stripped-down environment.** `GITHUB_TOKEN*`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_*` and anything else not on the allowlist in `config.py` are withheld.
 - **Claude is read-only.** `claude -p --restricted --tools Read,Grep,Glob --strict-mcp-config`: no shell, no file writes, no web, no MCP servers. Its working directory is the scan's output folder, so the repo's `.claude/` settings and hooks never load. The prompt tells it to treat repo content as untrusted data. GitHub tokens are removed from its environment.
 - **Except in `vulnscan fix`,** where Claude may also Edit and Write, inside a throwaway clone and the run's `fix/` folder only. It still has no shell, web, MCP or token, and `--restricted` refuses writes to `.git` and settings files. vulnscan commits and pushes. Repo content could still steer the change Claude writes, which is why every PR is a draft that a person must review. The PRs never go to public repos. They include reproduction steps with placeholders, but never Strix's raw PoC.
-- **Secret values are redacted** by gitleaks before they reach disk.
+- **Secret values are redacted** by gitleaks before they reach disk, and every Claude prompt forbids copying a secret's value, even partly, into its answer.
+- **Prompt injection aimed at vulnscan itself:** Claude and Strix are told to treat repo content as data, and the prompt-injection check reports text in the repo that tries to steer them.
 - **Files are private.** Everything is created readable by the current user only (umask 077).
 - **The org restriction** (`VULNSCAN_GITHUB_ORG`) stops it being pointed at arbitrary repos.
 - **Validation runs inside Strix's own Docker sandbox,** which is the one place the scanned repo's code may run — deliberately, because PoC validation needs it. vulnscan clones the repo itself and passes a local directory, so the GitHub token never reaches Strix; Strix gets only its own `LLM_API_KEY`, and `--url` targets are the operator's responsibility to authorise. Local folders and stage-1 clones are copied first, because Strix mounts targets writable.

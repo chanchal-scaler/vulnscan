@@ -2,13 +2,14 @@ import time
 from datetime import datetime, timezone
 
 from .config import SCANS_DIR, TOOL_TIMEOUT, log, scanner_env
+from .deep_review import deep_review as run_deep_review
 from .detect import detect_stacks
 from .findings import rel_path, sort_key
 from .installer import InstallError, ensure
 from .repo import checkout, git_head
 from .report import severity_counts, write_reports
 from .tools import ALL_TOOLS
-from .triage import triage
+from .triage import Budget, triage
 
 
 def _run_tools(repo, stacks, raw_dir):
@@ -20,7 +21,7 @@ def _run_tools(repo, stacks, raw_dir):
             runs.append({"tool": tool.name, "status": "not applicable"})
             continue
         try:
-            exe = ensure(tool)
+            exe = ensure(tool) if tool.command else None  # a built-in check has nothing to install
         except InstallError as e:
             log(f"{tool.name}: install failed: {e}")
             runs.append({"tool": tool.name, "status": "install failed", "errors": [str(e)]})
@@ -46,8 +47,13 @@ def _run_tools(repo, stacks, raw_dir):
     return findings, runs
 
 
-def scan(spec, ref=None, use_llm=True, model=None, max_triage=400, keep_clone=False):
-    """Scan a repo and write reports. Returns (report_path, open severity counts)."""
+def scan(spec, ref=None, use_llm=True, model=None, max_triage=400, keep_clone=False,
+         deep_review=False, deep_paths=(), claude_budget=None):
+    """Scan a repo and write reports. Returns (report_path, open severity counts).
+
+    deep_review adds Claude's per-class review of the whole codebase (deep_review.py), limited to
+    deep_paths if given. claude_budget caps the scan's Claude usage, in USD at API rates.
+    """
     with checkout(spec, ref, keep_clone) as (repo, label):
         now = datetime.now(timezone.utc)
         run_dir = SCANS_DIR / label.replace("/", "__") / now.strftime("%Y%m%d-%H%M%S")
@@ -62,11 +68,16 @@ def scan(spec, ref=None, use_llm=True, model=None, max_triage=400, keep_clone=Fa
         for i, f in enumerate(findings, 1):
             f.id = f"F{i:03d}"
 
-        result, triage_meta = None, {"status": "skipped (--no-llm)"}
+        result, triage_meta, deep_meta = None, {"status": "skipped (--no-llm)"}, None
         if use_llm:
+            budget = Budget(claude_budget)
             result, triage_meta = triage(
-                [f for f in findings if f.severity != "info"], repo, list(stacks), run_dir, model, max_triage,
+                [f for f in findings if f.severity != "info"], repo, list(stacks), run_dir, model, max_triage, budget,
             )
+            if deep_review:
+                found, deep_meta = run_deep_review(repo, list(stacks), findings, result["additional_findings"],
+                                                   run_dir, model, budget, deep_paths)
+                result["additional_findings"] += found
             findings.sort(key=sort_key)
 
         meta = {
@@ -77,5 +88,7 @@ def scan(spec, ref=None, use_llm=True, model=None, max_triage=400, keep_clone=Fa
             "tools": runs,
             "triage": triage_meta,
         }
+        if deep_meta is not None:
+            meta["deep_review"] = deep_meta
         report = write_reports(run_dir, meta, findings, result)
         return report, severity_counts(findings, result)

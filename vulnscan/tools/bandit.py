@@ -15,7 +15,12 @@ class Bandit(Tool):
         return [repo] if "python" in stacks else []
 
     def args(self, exe, target, report):
-        return [exe, "-r", str(target), "-f", "json", "-o", str(report), "-q", "-x", _EXCLUDE]
+        # The scanned repo's own "# nosec" comments and .bandit file (skipped tests) don't hide findings:
+        # --ignore-nosec, and an empty ini of ours, which bandit then reads instead of the repo's.
+        ini = report.with_suffix(".ini")
+        ini.write_text("[bandit]\n")
+        return [exe, "-r", str(target), "-f", "json", "-o", str(report), "-q", "-x", _EXCLUDE,
+                "--ignore-nosec", "--ini", str(ini)]
 
     def parse(self, data, repo, target):
         return [

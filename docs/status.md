@@ -1,6 +1,6 @@
 # Status and backlog
 
-Last updated 2026-11-04. Update this file whenever the deployment or the code's capabilities change. IDs for the live deployment are in `deploy/terraform/ENVIRONMENT.local.md`, and scan results stay on the instance. Neither goes in this repo.
+Last updated 2026-11-05. Update this file whenever the deployment or the code's capabilities change. IDs for the live deployment are in `deploy/terraform/ENVIRONMENT.local.md`, and scan results stay on the instance. Neither goes in this repo.
 
 ## Deployed
 
@@ -59,6 +59,34 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
   - It runs past a fix branch while a full re-validation is still refused, and the dashboard reads the merged file.
   - Not yet run with real Strix.
 
+- **Prompt and logic review, and the prompt-injection check (local, 2026-11-05):** not yet on the instance.
+  - **Triage, with a stand-in Claude:**
+    - samples are spread across app folders, with `spec/` and `vendor/` last;
+    - a sample's own verdict detaches it from its group;
+    - mutual duplicates leave one `needs_review`;
+    - a skipped item is listed in `errors`;
+    - the review is its own call, without dependencies in its list.
+  - **Validation, with a stand-in Strix:**
+    - a 15-hit group is sent once, dependencies come last, and `info` is refused;
+    - `[F1234]` and `[new]` tags parse;
+    - `--only` takes a non-first group member;
+    - the dashboard shows "grouped with F…".
+  - **Fix, with stand-ins against a local bare repo:** a failed PR call deletes the pushed branch and the re-run opens the PR. The prompt carries the stage-1 finding and the secret rule.
+  - **Real pinned scanners in the image, on a planted repo:** every suppression in [testing.md](testing.md) check 16 behaved as expected.
+  - **The prompt-injection check:** it caught every planted case. After tuning, it reported nothing on the largest local Rails monolith (24 s) or on vulnscan itself.
+  - **Real Claude on OWASP/railsgoat (30 items, 2 batches and the review):**
+    - Batches: every item got a verdict, there were no permission denials, and all 7 duplicates named their pair in `duplicate_of`. A gem used only in development and tests was rated low.
+    - Review: 10 issues, each naming its entry point and who can reach it, with no repeats of scanner findings. Its summary ends with what it didn't review and says it found no planted prompt injection.
+    - No output quotes any part of the committed `secret_key_base`.
+    - Cost at API rates: $0.92 for the batches, plus $1.67 for the review (61 turns, 342 s). The separate review costs more than it did inside batch 1 (the whole 2026-11-04 run was $0.90).
+
+- **`--deep-review` and `--claude-budget` (local, 2026-11-06):** not yet on the instance.
+  - **Stand-ins:** the budget stops at the right call, both in triage and in the deep review, and every skip is reported. Deep findings get `C…` ids, "Found in" and validation. The CLI guards exit 2.
+  - **Listing on the largest local Rails app:** 6 s, giving 220 call sites in 94 files and 1,358 handler files, which makes 10 SSRF and 37 access-control batches.
+  - **Real Claude, $3.73 at API rates in all:**
+    - pygoat's SSRF lab: the SSRF was found and traced ($0.46). The access pass found an `X-Forwarded-For` bypass and named a hardcoded key without quoting it ($0.59).
+    - railsgoat's 17 controllers: every one reviewed. The first run (no scanner findings passed) reported 24 issues, half of them other classes, so the prompt was tightened. The rerun, with the 150 scanner findings as context, reported 13 issues, all access control apart from two high or critical injections whose sinks are outside the batch ($1.28, 337 s).
+
 ## Scans run
 
 - **The largest Rails monolith (63k files, about 7,700 findings):** one complete scan, with the **old** triage (first 150 by severity), on 2026-11-03.
@@ -70,9 +98,12 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 
 | Issue | Impact | Notes |
 |---|---|---|
-| Claude marks an unused dependency `confirmed`, at a lower severity, even when its reason says the package isn't imported | Dependency noise in the confirmed list | Tighten the prompt: unused → `false_positive`. Seen in testing (`requests`, `urllib3`). |
-| Claude's own review is shallow on large repos | Issues no scanner flags (IDOR, authz, SSRF) are mostly missed in monoliths | Backlog: deep review. On 2026-11-05 the batch-1 prompt gained sink-first SSRF tracing and an LLM-app checklist, after a manual review found issues the scan missed ([decisions.md](decisions.md)). Not yet run with real Claude. |
-| Grouped rules are judged from 5 samples | A confirmed group may include false positives, and a dismissed group may hide a real hit | `reviewed_as` in the CSV marks these |
+| Claude marked an unused dependency `confirmed`, at a lower severity, even when its reason said the package isn't imported | Dependency noise in the confirmed list | Seen in testing (`requests`, `urllib3`). The prompt now says never loaded → `false_positive`, development or tests only → low (2026-11-05). Check on the next real scan. |
+| Claude's own review is shallow on large repos | Issues no scanner flags (IDOR, authz, SSRF) are mostly missed in monoliths | `--deep-review` (2026-11-06) covers every outbound HTTP call for SSRF and every handler file for access control, at a large quota cost. Without it, the general review still samples. Other classes Claude might find (business logic, for one) stay out of reach on a monolith |
+| `--deep-review` finds only what its patterns list | An HTTP client or routing style its patterns don't know is never deep-reviewed | The patterns cover the common clients and frameworks of the org's stacks. Add to `_HTTP_CALL` or `_HANDLER` in `deep_review.py` when a repo uses another |
+| Grouped rules are judged from 5 samples | A confirmed group may include false positives, and a dismissed group may hide a real hit | `reviewed_as` in the CSV marks these. Since 2026-11-05 the samples are spread across app folders (tests and vendored code last), and Claude can give a sample its own verdict |
+| Some suppressions in the scanned repo can't be switched off | gitleaks honours `.gitleaksignore`, checkov `.checkov.yaml`, semgrep `.semgrepignore`, whatever the flags | The first two become findings that point Claude at the file; `.semgrepignore` doesn't ([decisions.md](decisions.md)) |
+| The prompt-injection check matches patterns | A payload worded differently, or encoded some other way, gets past it; an app's own LLM prompts can match | Claude's review also looks for planted instructions, and triage dismisses the app's own prompts |
 | More than 400 items on the biggest repo (637 critical/high items there) | The least severe dependency items stay untriaged | `--max-triage 700` covers them, at the cost of time and quota |
 | semgrep's full runtime on the biggest repo hasn't been measured | It may need more than 30 minutes | Use `VULNSCAN_TOOL_TIMEOUT=3600`; note the time after the next run |
 | The `instance_type` variable defaults to `t4g.large`, but the deployment uses `t3.large` (set in `terraform.tfvars`) | A fresh deployment without tfvars gets t4g, which had no Spot capacity | Consider changing the default |
@@ -83,7 +114,7 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 | `fix` can't regenerate lockfiles | Dependency findings are usually "not fixed": Claude changes versions only when it can keep the manifest and lockfile consistent by hand | Bump dependencies with Dependabot or by hand |
 | Claude runs on one person's subscription token | Usage limits are shared with that person's own use, and the token stops working if they leave | Switch to Bedrock (the instance role) or an API key; no code change needed |
 | `vulnerabilities.json` has no documented schema | A Strix release could change field names and validation reports would come out empty | Parsed defensively with a SARIF fallback, and exit 2 with nothing parsed is an error, not "no findings"; raw artifacts are always kept under `raw/strix/` for a fix |
-| Strix's findings are matched back to stage 1 by the ids it names in its text | Coverage lists can undercount (a finding validated but not labelled stays "not referenced") | The instruction file asks Strix to name ids; treat the coverage list as best effort |
+| Strix's findings are matched back to stage 1 by the `[F012]` tag it's asked to start each title with | Coverage lists can undercount (a finding validated but not tagged stays "not referenced"). An untagged title falls back to every id in its text, which can over-count | Treat the coverage list as best effort. Not yet run with real Strix |
 | Validation runs only where Docker and an OpenRouter key exist | The instance can't run it yet | Wiring is done (image, wrapper, parameter); first run pending |
 | Validate containers get the host Docker socket | A Strix sandbox manipulated through repo content could control the host daemon, i.e. the instance (~root); it could then read the three tokens via the instance role | Deliberate, documented exception ([decisions.md](decisions.md)): PoC validation needs sibling containers. Only the `validate` subcommand gets the socket; `--budget` and `VULNSCAN_VALIDATE_TIMEOUT` bound a run; the GitHub/Claude/OpenRouter tokens are the only secrets reachable, and the instance has no other AWS rights |
 | A validate run copies the repo into the run folder | The reports volume (5 GB) briefly holds a second copy of the repo; a 1.6 GB monolith needs ~3.2 GB free | Grow `data_volume_gb`, or validate big repos at a smaller `--ref`; the copy is removed when the run ends |
@@ -104,10 +135,9 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
    - it compares each run with the previous `report.json`;
    - it posts new confirmed critical/high findings to Slack.
    This is what would have caught HttpToShell-style exposures. Needs a webhook and approval.
-4. **A `--deep-review` mode:** after triage, split the app by entry points (e.g. one Claude call per controller directory), each with a stack-specific checklist. For Rails: authorization in every action, unscoped `find` (IDOR), strong params, `send_file`/redirects, Ransack, outbound HTTP (SSRF). This trades time and quota for coverage of issues scanners can't see.
-5. **Prompt fix for unused dependencies** (see Known issues).
-6. **Terraform state to S3,** with DynamoDB locking or S3 native locking.
-7. **An optional full-history secret scan** (`gitleaks git` on a full clone).
-8. **Move Claude to Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`). The container would then need AWS credentials: raise the hop limit to 2, or have the wrapper pass in short-lived credentials.
-9. **Fine-grained per-org tokens or a GitHub App** instead of the classic PAT.
-10. **An automated test suite,** turning [testing.md](testing.md) checks 3, 7 and 10 into scripts.
+4. **Run `--deep-review` on a real repo:** start with `--deep-path` on one area of a monolith and a `--claude-budget`. Note how much of the plan's allowance it used (the claude.ai usage page before and after), how long it took and what it found, before running it on a whole app.
+5. **Terraform state to S3,** with DynamoDB locking or S3 native locking.
+6. **An optional full-history secret scan** (`gitleaks git` on a full clone).
+7. **Move Claude to Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`). The container would then need AWS credentials: raise the hop limit to 2, or have the wrapper pass in short-lived credentials.
+8. **Fine-grained per-org tokens or a GitHub App** instead of the classic PAT.
+9. **An automated test suite,** turning [testing.md](testing.md) checks 3, 7, 10, 15 and 16 into scripts.

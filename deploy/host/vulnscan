@@ -49,6 +49,7 @@ run_args=(-d --init --label vulnscan \
   --memory 6g --pids-limit 1024 \
   -e GITHUB_TOKEN -e CLAUDE_CODE_OAUTH_TOKEN -e VULNSCAN_GITHUB_ORG \
   -e VULNSCAN_TOOL_TIMEOUT -e VULNSCAN_TRIAGE_TIMEOUT -e VULNSCAN_VALIDATE_TIMEOUT \
+  -e VULNSCAN_TRIAGE_BATCH -e VULNSCAN_VALIDATE_BUDGET \
   -v /var/lib/vulnscan/scans:/var/lib/vulnscan/scans)
 if [ "$validate" = "validate" ]; then
   # Strix's sandbox containers are siblings on the host daemon, so it needs the socket:

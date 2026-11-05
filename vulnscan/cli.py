@@ -13,10 +13,18 @@ from .validate import DEFAULT_MODEL, ValidateError, validate
 
 
 def _cmd_scan(args):
+    problem = ("--deep-review needs Claude, so it can't be used with --no-llm" if args.deep_review and args.no_llm
+               else "--deep-path only applies with --deep-review" if args.deep_path and not args.deep_review
+               else "--claude-budget must be more than 0" if args.claude_budget is not None and args.claude_budget <= 0
+               else None)
+    if problem:
+        log(problem)
+        return 2
     try:
         report, counts = scan(
             args.repo, ref=args.ref, use_llm=not args.no_llm, model=args.model,
             max_triage=args.max_triage, keep_clone=args.keep_clone,
+            deep_review=args.deep_review, deep_paths=args.deep_path or (), claude_budget=args.claude_budget,
         )
     except RepoError as e:
         log(str(e))
@@ -70,7 +78,7 @@ def _cmd_dashboard(args):
 def _cmd_tools(args):
     status = 0
     for tool in ALL_TOOLS:
-        exe = find(tool.command)
+        exe = find(tool.command) if tool.command else "built in"
         if not exe and args.install:
             try:
                 exe = ensure(tool)
@@ -100,6 +108,14 @@ def main(argv=None):
                    help="max items Claude reviews, most important first; a dependency or a rule with many hits "
                         "counts as one item (default: 400, in batches of 100)")
     s.add_argument("--keep-clone", action="store_true", help="keep the cloned repo after the scan")
+    s.add_argument("--deep-review", action="store_true",
+                   help="after triage, have Claude check every outbound HTTP call for SSRF and every request handler "
+                        "for broken access control, in batches. Slow, and uses far more Claude quota")
+    s.add_argument("--deep-path", action="append", metavar="PATH",
+                   help="limit the deep review to files under this path, relative to the repo root (repeatable)")
+    s.add_argument("--claude-budget", type=float, metavar="USD",
+                   help="start no more Claude calls once this scan's usage reaches this many dollars at API rates. "
+                        "With a subscription token nothing is billed: it caps the plan allowance used (default: no cap)")
     s.set_defaults(func=_cmd_scan)
 
     t = sub.add_parser("tools", help="list scanners and whether they are installed")
