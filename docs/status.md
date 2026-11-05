@@ -83,7 +83,10 @@ Last updated 2026-11-05. Update this file whenever the deployment or the code's 
 - **Claude pinned to Opus 5.5 (2026-11-06):** every call passes `--model claude-opus-5-5` (checked with a stand-in). It hasn't run with real Claude yet: the local CLI (2.1.267) is older than the 2.1.280 that Opus 5.5 needs, and the image has 2.1.311. Earlier real runs used Claude Code's default, which was `claude-opus-5[1m]` locally (2.1.267) and `claude-sonnet-5-5` on the instance (2.1.311).
 - **`--deep-review` and `--claude-budget` (2026-11-06):**
   - **First full run on the instance, scaler-hq/backend, on Sonnet 5.5 before the pin:** 11 calls (2 triage batches, the review, 4 SSRF and 4 access-control batches), 5–36 turns each, no permission denials. $2.90 at API rates, about 1% of the weekly limit.
-  - **With Opus 5.5 pinned:** twice the per-token price and usually more thorough, so expect roughly 2–4% for the same scan (an estimate, not measured). Claude Code also has an Opus-specific limit, so watch for usage-limit failures in long deep reviews.
+  - **The same scan with Opus 5.5 pinned:** $10.95 at API rates, 3.8× the Sonnet run. Claude Code also has an Opus-specific limit, so watch for usage-limit failures in long deep reviews.
+    - **Compared with Sonnet:** decisive where Sonnet deferred (`needs_review` went from 11 to 1), and it rated leaked credentials critical. The general review found 10 issues (its cap) instead of 2. No dependencies were rated high, against 112 for Sonnet: 52 pillow and 41 aiohttp advisories, plus python-multipart, starlette and weasyprint. Opus's reasons were specific.
+    - **Gaps found and fixed in the prompts (2026-11-06):** DoS had no place on the severity scale, and the SSRF pass couldn't see content renderers ([decisions.md](decisions.md)). WeasyPrint rendering user-derived content needs a person's look and `validate --only`.
+    - **Still on Opus:** the general review now hits its 10-issue cap.
   - **Stand-ins:** the budget stops at the right call, both in triage and in the deep review, and every skip is reported. Deep findings get `C…` ids, "Found in" and validation. The CLI guards exit 2.
   - **Listing on the largest local Rails app:** 6 s, giving 220 call sites in 94 files and 1,358 handler files, which makes 10 SSRF and 37 access-control batches.
   - **Real Claude, $3.73 at API rates in all:**

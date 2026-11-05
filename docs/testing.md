@@ -351,7 +351,7 @@ with mock.patch.object(sc, "_run_tools", lambda repo, stacks, raw: ([], [])), \
 ```
 
 What to verify:
-- **Inventory:** imports, `require` lines, comments, browser JS, tests and vendored code aren't call sites. Rails controllers and the other frameworks' handlers are found. `--deep-path` (the `paths` argument) keeps only files under it. On the largest local Rails app, listing takes seconds.
+- **Inventory:** imports, `require` lines, comments, browser JS, tests (including `cypress/` and `e2e/`) and vendored code aren't call sites. Renderer calls are: `HTML(string=html).write_pdf(…)`, `pdfkit.from_string`, `render pdf:`, `WickedPdf.new`, `page.setContent`, `page.goto`, `WebBaseLoader(…)`. Rails controllers and the other frameworks' handlers are found. `--deep-path` (the `paths` argument) keeps only files under it. On the largest local Rails app, listing takes seconds.
 - **Batches:** at most 25 call sites per SSRF batch; access-control batches follow folder order at about 4,000 lines.
 - **Prompts:** each deep prompt lists its batch's sites or files and the general review's findings as "already reported".
 - **Budget:** with $1 calls and `claude_budget=2.5`, the review and two deep batches run and the rest are `skipped`. The report's "Deep review" line counts them, and "Deep review: batches not reviewed" names them. With a budget smaller than one triage batch, later triage batches and the review are recorded as skipped in `triage.errors`, with `review: skipped`.

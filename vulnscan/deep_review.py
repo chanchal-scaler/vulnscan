@@ -29,15 +29,23 @@ _BROWSER_PATH = re.compile(r"(^|/)(assets|javascripts?|public|static|client|fron
 # Imports and comments name HTTP libraries without calling them.
 _NOT_A_CALL = re.compile(r"^\s*(?:require(?:_relative)?\b|import\b|from\s+\S+\s+import\b|#|//|/?\*)")
 
+# HTTP clients, plus libraries that fetch the URLs inside content they render or load (HTML-to-PDF
+# renderers, headless browsers, web loaders): those make requests with no HTTP call in the app's own code.
 _HTTP_CALL = {lang: re.compile(p) for lang, p in {
     "rb": r"Net::HTTP|HTTParty|Faraday|RestClient|URI\.open|open-uri|Excon|Typhoeus|Down\.(?:download|open)"
-          r"|\bHTTP\.(?:get|post|put|patch|delete|head|follow|headers|auth|timeout)\b",
+          r"|\bHTTP\.(?:get|post|put|patch|delete|head|follow|headers|auth|timeout)\b"
+          r"|WickedPdf\.new|\brender\s*\(?\s*pdf:|PDFKit\.new|Grover\.new|Ferrum::Browser",
     "py": r"\brequests\.(?:get|post|put|patch|delete|head|request|Session)\b|\bhttpx\.|aiohttp\.ClientSession"
-          r"|\burlopen\(|\burllib3\.|\bpycurl\b",
-    "js": r"\bfetch\(|\baxios\b|\bgot\(|node-fetch|\bsuperagent\b|\bhttps?\.(?:request|get)\(|\bundici\b|\bneedle\(",
-    "go": r"\bhttp\.(?:Get|Post|Head|PostForm|NewRequest(?:WithContext)?)\(|\.Do\(req\b",
-    "jvm": r"RestTemplate|WebClient|HttpClient|OkHttpClient|new URL\(",
-    "php": r"curl_init|file_get_contents\(\s*\$|Http::(?:get|post)|GuzzleHttp",
+          r"|\burlopen\(|\burlretrieve\(|\burllib3\.|\bpycurl\b"
+          r"|\.write_pdf\(|\bweasyprint\.HTML\(|\bHTML\(\s*(?:string|url|filename)=|\bpdfkit\.from_|\bwkhtmltopdf\b"
+          r"|\bpisa\.CreatePDF\(|\.goto\(|\bwebdriver\.\w+\(|\b(?:WebBase|UnstructuredURL|SeleniumURL|PlaywrightURL"
+          r"|AsyncHtml|AsyncChromium|RecursiveUrl|Sitemap)Loader\(",
+    "js": r"\bfetch\(|\baxios\b|\bgot\(|node-fetch|\bsuperagent\b|\bhttps?\.(?:request|get)\(|\bundici\b|\bneedle\("
+          r"|\.goto\(|\.setContent\(|\bhtml-pdf\b|\bwkhtmltopdf\b",
+    "go": r"\bhttp\.(?:Get|Post|Head|PostForm|NewRequest(?:WithContext)?)\(|\.Do\(req\b|\bchromedp\.Navigate\("
+          r"|\bwkhtmltopdf\.",
+    "jvm": r"RestTemplate|WebClient|HttpClient|OkHttpClient|new URL\(|ITextRenderer|PdfRendererBuilder",
+    "php": r"curl_init|file_get_contents\(\s*\$|Http::(?:get|post)|GuzzleHttp|\bDompdf\b|Browsershot|wkhtmltopdf",
 }.items()}
 
 _HANDLER = {lang: re.compile(p, re.M) for lang, p in {
@@ -69,14 +77,20 @@ This is batch {n} of {total} of a deep review's SSRF pass; other batches cover t
 2. A call is safe when its host is fixed or comes from a fixed allowlist, or when the code checks the resolved IP
    address (no private, loopback, link-local or cloud metadata addresses such as 169.254.169.254) on every request,
    redirects included. A check on the URL text alone, or one made before redirects are followed, isn't enough.
-3. Code that runs in the browser isn't SSRF; skip it.
-4. Report only SSRF you have verified, under additional_findings, with file paths relative to the repository root.
+3. Some call sites render or load content rather than call an HTTP client: HTML-to-PDF renderers (WeasyPrint,
+   pdfkit, wkhtmltopdf, WickedPdf, Dompdf), headless browsers (page.goto, page.setContent) and web loaders. They
+   fetch every URL inside that content (img src, link href, CSS url(), iframes, redirects), and often file://
+   paths too. For these, trace where the content comes from and whether users can put URLs or markup into it,
+   for example through notes, Markdown, rich text or LLM output built from their input, and check whether the
+   library's fetching is restricted (a custom url_fetcher, request interception, disabled local file access).
+4. Code that runs in the browser isn't SSRF; skip it.
+5. Report only SSRF you have verified, under additional_findings, with file paths relative to the repository root.
    In the description, name the entry point (method and route, or job and what triggers it), who can reach it
    (anyone, any logged-in user, admins) and what an attacker could reach. Report an issue once and name its other
    call sites in the description.
-5. Rate severity by what an attacker can do in this codebase:
+6. Rate severity by what an attacker can do in this codebase:
 {severity}
-6. In the summary, say how many of the call sites you checked and name any you couldn't trace.
+7. In the summary, say how many of the call sites you checked and name any you couldn't trace.
 
 Call sites (file: lines):
 {items}

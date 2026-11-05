@@ -25,7 +25,8 @@ SAMPLES = 5  # example locations sent for such a rule
 _ORDER = {"secret": 0, "code": 1, "config": 2, "dependency": 3}
 _DISMISSED = ("false_positive", "duplicate")
 # Hits here say little about how a pattern behaves in the app itself.
-LOW_VALUE_PATH = re.compile(r"(^|/)(tests?|specs?|__tests__|fixtures?|vendor|third_party|examples?|samples?|docs?)/"
+LOW_VALUE_PATH = re.compile(r"(^|/)(tests?|specs?|__tests__|cypress|e2e|fixtures?|vendor|third_party|examples?|samples?"
+                            r"|docs?)/"
                             r"|(_test|_spec|\.test|\.spec)\.[^/]+$", re.I)
 
 
@@ -110,8 +111,10 @@ name or ID is fine)."""
 _SEVERITY_GUIDE = """   - critical: remote code execution, SQL injection or authentication bypass that needs no login; SSRF that can
      reach cloud instance metadata or internal services; a live production credential
    - high: exploitable by any logged-in user, or by anyone with less impact than above: other users' data
-     (IDOR), stored or reflected XSS, privilege escalation, unsafe deserialization of user data
-   - medium: needs unusual conditions, a privileged attacker or user interaction, or has limited impact
+     (IDOR), stored or reflected XSS, privilege escalation, unsafe deserialization of user data; denial of
+     service where one request, or a few, from anyone can make the service unavailable
+   - medium: needs unusual conditions, a privileged attacker or user interaction, or has limited impact;
+     denial of service that needs a login or sustained volume
    - low: hardening and defence in depth
    - info: not a vulnerability"""
 
@@ -135,6 +138,9 @@ Detected stacks: {stacks}
    loaded is false_positive, and one used only in development or tests is low. Ruby's Bundler.require loads
    every gem in the default group, and a transitive dependency is loaded by its parent, so not finding an
    import isn't proof on its own. The fix is the lowest version that fixes every listed advisory.
+   A package that fetches the URLs found in content it processes (HTML-to-PDF renderers such as WeasyPrint,
+   pdfkit, wkhtmltopdf or WickedPdf, headless browsers, document and web loaders) is an SSRF sink: if users
+   can put URLs into that content (img src, link href, CSS url(), iframes), rate it as SSRF.
 4. Items with "hits" and "samples" are one scanner rule that fired many times. Check the samples and judge the
    pattern in this codebase. If a sample doesn't fit your verdict on the pattern (a real hit among false
    positives, say), also give that sample's id its own verdict.
@@ -168,7 +174,9 @@ Detected stacks: {stacks}
    Net::HTTP, open-uri, Faraday, HTTParty, fetch, axios, http.Get, ...) and check where each URL comes from.
    User-controlled URLs hide in URL previews, webhooks, imports, and image or file URLs extracted from
    user-supplied HTML or markdown (for example to pass to an LLM). Following redirects defeats a check
-   made only on the first URL.
+   made only on the first URL. Libraries that render or load content fetch every URL inside it, with no
+   HTTP call in the app's own code: HTML-to-PDF renderers (WeasyPrint, pdfkit, wkhtmltopdf, WickedPdf),
+   headless browsers (Puppeteer, Playwright) and web loaders. Check what content reaches them.
    If the app calls an LLM (OpenAI, Anthropic, Bedrock, Gemini, LangChain, LiteLLM, ...), also check for:
    - prompt injection: untrusted text (user answers, code, resumes, uploaded files, retrieved documents, or
      stored conversations fed to later jobs) placed in a prompt whose output decides something (scores,
