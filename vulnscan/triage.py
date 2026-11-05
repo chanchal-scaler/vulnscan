@@ -17,7 +17,7 @@ import subprocess
 import time
 from collections import defaultdict
 
-from .config import TRIAGE_BATCH, TRIAGE_TIMEOUT, log
+from .config import CLAUDE_MODEL, TRIAGE_BATCH, TRIAGE_TIMEOUT, log
 from .findings import SEVERITIES
 
 GROUP_MIN = 10  # a rule with more hits than this is reviewed as one pattern
@@ -399,6 +399,7 @@ def triage(findings, repo, stacks, run_dir, model=None, max_items=400, budget=No
     failed_calls = sum(1 for e in errors if ": no verdict for " not in e)
     meta = {
         "status": "failed" if failed_calls == len(batches) + 1 else "partial" if errors else "done",
+        "model": model or CLAUDE_MODEL,
         "cost_usd": cost,
         "items": len(selected),
         "items_total": len(items),
@@ -429,8 +430,7 @@ def _run_claude(prompt, repo, run_dir, model, output_name, schema=SCHEMA, tools=
         # Only the fix stage: edits are accepted inside the working directories, while
         # --restricted still refuses writes to git, settings and tool-configuration files.
         cmd += ["--permission-mode", "acceptEdits"]
-    if model:
-        cmd += ["--model", model]
+    cmd += ["--model", model or CLAUDE_MODEL]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_TOKEN", "GH_TOKEN"))}
 
     try:

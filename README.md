@@ -61,7 +61,7 @@ A stack without its own scanner still gets semgrep, osv-scanner, gitleaks, the p
 
 ## What Claude does
 
-Claude Code runs headless, with read-only tools (Read, Grep, Glob) and no shell or web access. It does two different jobs.
+Claude Code runs headless, with read-only tools (Read, Grep, Glob) and no shell or web access. Every call uses **Claude Opus 5.5** (`claude-opus-5-5`, set in `config.CLAUDE_MODEL`) rather than Claude Code's default, which depends on the account and the Claude Code version. `--model` overrides it for one run, and `report.json` records which model triaged (`triage.model`). It does two different jobs.
 
 **1. Verifying the scanners' findings: most of the work.** The scanners decide what gets looked at. For each item Claude reads the code and gives a verdict:
 - **confirmed**, **false_positive**, **duplicate** or **needs_review**;
@@ -198,7 +198,7 @@ Cells that would start with `=`, `+`, `-` or `@` get a leading `'`, so spreadshe
 
 ## Running it locally
 
-Requirements: Python 3.9+, git, and the [Claude Code CLI](https://code.claude.com/docs/en/setup) signed in, or `CLAUDE_CODE_OAUTH_TOKEN`. To install brakeman you also need Ruby 3.2+, and to run gosec the Go toolchain. Without those, the report shows those tools as failed and the rest still runs.
+Requirements: Python 3.9+, git, and the [Claude Code CLI](https://code.claude.com/docs/en/setup) 2.1.280 or newer (the first to support Claude Opus 5.5; `claude update`) signed in, or `CLAUDE_CODE_OAUTH_TOKEN`. An older CLI fails every Claude call with "does not support this model". To install brakeman you also need Ruby 3.2+, and to run gosec the Go toolchain. Without those, the report shows those tools as failed and the rest still runs.
 
 ```bash
 cd ~/development/vulnscan
@@ -213,7 +213,7 @@ vulnscan tools --install   # optional: install every scanner up front
 vulnscan scan your-org/repo                          # default branch
 vulnscan scan https://github.com/your-org/repo --ref release-2026-11
 vulnscan scan ~/development/some-app --no-llm        # local folder, scanners only
-vulnscan scan your-org/repo --model opus             # pick Claude's model
+vulnscan scan your-org/repo --model claude-sonnet-5-5   # another Claude model for this run (default: claude-opus-5-5)
 vulnscan scan your-org/repo --max-triage 600         # let Claude review more items (default 400)
 vulnscan scan your-org/repo --keep-clone             # keep the clone for debugging
 vulnscan scan your-org/repo --deep-review --claude-budget 40               # whole-codebase SSRF and access-control review, capped

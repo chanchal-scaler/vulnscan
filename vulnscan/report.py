@@ -109,6 +109,8 @@ def write_reports(run_dir, meta, findings, triage_result):
     if t.get("items") is not None:
         triage_line += (f" ({t['items']} of {t['items_total']} items reviewed in {t['batches']} batch(es),"
                         f" covering {t['findings_covered']} findings")
+        if t.get("model"):
+            triage_line += f", {t['model']}"
         if t.get("cost_usd") is not None:
             triage_line += f", ${t['cost_usd']:.2f} at API rates"
         triage_line += ")"

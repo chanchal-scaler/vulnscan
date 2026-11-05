@@ -80,7 +80,10 @@ Last updated 2026-11-05. Update this file whenever the deployment or the code's 
     - No output quotes any part of the committed `secret_key_base`.
     - Cost at API rates: $0.92 for the batches, plus $1.67 for the review (61 turns, 342 s). The separate review costs more than it did inside batch 1 (the whole 2026-11-04 run was $0.90).
 
-- **`--deep-review` and `--claude-budget` (local, 2026-11-06):** not yet on the instance.
+- **Claude pinned to Opus 5.5 (2026-11-06):** every call passes `--model claude-opus-5-5` (checked with a stand-in). It hasn't run with real Claude yet: the local CLI (2.1.267) is older than the 2.1.280 that Opus 5.5 needs, and the image has 2.1.311. Earlier real runs used Claude Code's default, which was `claude-opus-5[1m]` locally (2.1.267) and `claude-sonnet-5-5` on the instance (2.1.311).
+- **`--deep-review` and `--claude-budget` (2026-11-06):**
+  - **First full run on the instance, scaler-hq/backend, on Sonnet 5.5 before the pin:** 11 calls (2 triage batches, the review, 4 SSRF and 4 access-control batches), 5–36 turns each, no permission denials. $2.90 at API rates, about 1% of the weekly limit.
+  - **With Opus 5.5 pinned:** twice the per-token price and usually more thorough, so expect roughly 2–4% for the same scan (an estimate, not measured). Claude Code also has an Opus-specific limit, so watch for usage-limit failures in long deep reviews.
   - **Stand-ins:** the budget stops at the right call, both in triage and in the deep review, and every skip is reported. Deep findings get `C…` ids, "Found in" and validation. The CLI guards exit 2.
   - **Listing on the largest local Rails app:** 6 s, giving 220 call sites in 94 files and 1,358 handler files, which makes 10 SSRF and 37 access-control batches.
   - **Real Claude, $3.73 at API rates in all:**

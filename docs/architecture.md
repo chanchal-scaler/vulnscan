@@ -147,8 +147,9 @@ Findings are turned into **items**: the units Claude reviews. Each item is a pai
 - Each batch is one `_run_claude` call:
   ```
   claude -p --restricted --strict-mcp-config --tools Read,Grep,Glob --add-dir <repo>
-         --output-format json --json-schema <SCHEMA> [--model M]
+         --output-format json --json-schema <SCHEMA> --model <M>
   ```
+  - `M` is `--model`, or else `config.CLAUDE_MODEL` (`claude-opus-5-5`). It's passed on every call (triage, review, deep review, fix), so results don't depend on Claude Code's default for the account and version. Opus 5.5 needs Claude Code 2.1.280 or newer; the image pins 2.1.311. The triage metadata records it as `model`.
   - The prompt goes in on stdin.
   - The working directory is the run folder.
   - The environment has `GITHUB_TOKEN*` and `GH_TOKEN*` removed.

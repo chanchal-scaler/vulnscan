@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 
-from .config import log
+from .config import CLAUDE_MODEL, log
 from .dashboard import serve
 from .fix import FixError, fix
 from .installer import InstallError, ensure, find
@@ -103,7 +103,7 @@ def main(argv=None):
     s.add_argument("repo", help="org/repo, https://github.com/org/repo, or a local path")
     s.add_argument("--ref", help="branch or tag to scan (default: the repo's default branch)")
     s.add_argument("--no-llm", action="store_true", help="skip Claude triage and review")
-    s.add_argument("--model", help="Claude model for triage, e.g. opus (default: Claude Code's default)")
+    s.add_argument("--model", help=f"Claude model for triage, the review and the deep review (default: {CLAUDE_MODEL})")
     s.add_argument("--max-triage", type=int, default=400,
                    help="max items Claude reviews, most important first; a dependency or a rule with many hits "
                         "counts as one item (default: 400, in batches of 100)")
@@ -146,7 +146,7 @@ def main(argv=None):
     x.add_argument("repo", help="the repo that was validated: org/repo or a GitHub URL")
     x.add_argument("--run", help="run folder with validation.json (default: the latest for this repo)")
     x.add_argument("--ref", help="branch to fix and open PRs against (default: the repo's default branch)")
-    x.add_argument("--model", help="Claude model for the fixes, e.g. opus (default: Claude Code's default)")
+    x.add_argument("--model", help=f"Claude model for the fixes (default: {CLAUDE_MODEL})")
     x.add_argument("--only", action="append", metavar="ID",
                    help="fix only this validated finding, e.g. V003 (repeatable; default: all of them)")
     x.add_argument("--dry-run", action="store_true",

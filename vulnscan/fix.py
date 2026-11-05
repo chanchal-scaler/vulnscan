@@ -20,7 +20,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import SCANS_DIR, log
+from .config import CLAUDE_MODEL, SCANS_DIR, log
 from .report import _cell
 from .repo import RepoError, checkout, git_env, git_head, github_token, parse_github
 from .triage import TriageError, _run_claude
@@ -304,7 +304,7 @@ def fix(spec, run_dir=None, ref=None, model=None, dry_run=False, only=()):
 
     meta = {"repo": label, "run": run_dir.name, "fixed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "base": None, "commit": None, "validation_commit": validation.get("commit"),
-            "model": model, "dry_run": dry_run, "only": wanted or None, "cost_usd": None}
+            "model": model or CLAUDE_MODEL, "dry_run": dry_run, "only": wanted or None, "cost_usd": None}
     if not findings:
         log("fix: validation reported no findings; nothing to fix")
         return _write_reports(run_dir, meta, []), {}

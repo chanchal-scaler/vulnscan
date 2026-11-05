@@ -15,6 +15,9 @@ GITHUB_ORGS = [o.strip() for o in os.environ.get("VULNSCAN_GITHUB_ORG", "").spli
 TOOL_TIMEOUT = int(os.environ.get("VULNSCAN_TOOL_TIMEOUT", "1800"))
 TRIAGE_TIMEOUT = int(os.environ.get("VULNSCAN_TRIAGE_TIMEOUT", "3600"))  # per Claude batch
 TRIAGE_BATCH = int(os.environ.get("VULNSCAN_TRIAGE_BATCH", "100"))  # items per Claude batch
+# The model for every Claude Code call (triage, review, deep review, fix), so runs don't depend on Claude
+# Code's default for the account and version. --model overrides it. Needs Claude Code 2.1.280 or newer.
+CLAUDE_MODEL = "claude-opus-5-5"
 
 # Stage 2 (validation with Strix).
 VALIDATE_TIMEOUT = int(os.environ.get("VULNSCAN_VALIDATE_TIMEOUT", "7200"))  # one Strix run
