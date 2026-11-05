@@ -94,11 +94,27 @@ Items (JSON):
 {findings}
 """
 
-FIRST_STEPS = """2. Then look for up to 10 high-impact issues scanners commonly miss: SSRF (URL previews, webhooks or
-   imports fetching user-supplied URLs), missing authorization / IDOR, authentication bypass, unsafe
-   deserialization, command injection, mass assignment. Start from entry points (routes, controllers,
-   handlers). Report only issues you have verified in the code, under additional_findings, with file
-   paths relative to the repository root.
+FIRST_STEPS = """2. Then look for up to 10 high-impact issues scanners commonly miss: SSRF, missing authorization / IDOR,
+   authentication bypass, unsafe deserialization, command injection, mass assignment. Start from entry
+   points (routes, controllers, handlers). Cover the whole app: list its route or API modules and check
+   each one for missing authentication or authorization, rather than stopping once one area turns up issues.
+   For SSRF, also work back from the sinks: grep for outbound HTTP calls (requests, httpx, aiohttp, urllib,
+   Net::HTTP, open-uri, Faraday, HTTParty, fetch, axios, http.Get, ...) and check where each URL comes from.
+   User-controlled URLs hide in URL previews, webhooks, imports, and image or file URLs extracted from
+   user-supplied HTML or markdown (for example to pass to an LLM). Following redirects defeats a check
+   made only on the first URL.
+   If the app calls an LLM (OpenAI, Anthropic, Bedrock, Gemini, LangChain, LiteLLM, ...), also check for:
+   - prompt injection: untrusted text (user answers, code, resumes, uploaded files, retrieved documents, or
+     stored conversations fed to later jobs) placed in a prompt whose output decides something (scores,
+     grades, feedback, approvals, tool calls) with no separation from the instructions and no check of the
+     output; and secrets, reference solutions or rubrics in prompts that users can talk to;
+   - LLM output rendered as HTML or markdown without sanitising (XSS), or passed into SQL, shell, URLs or code;
+   - endpoints that let the client choose the model, max tokens, system prompt or upstream API path, or that
+     proxy to an LLM with the server's key; LLM endpoints with no authentication or rate limit (cost abuse);
+   - personal data (resumes, interview answers, contact details) sent unredacted to LLM providers or to
+     tracing tools such as Langfuse.
+   Report only issues you have verified in the code, under additional_findings, with file paths relative
+   to the repository root. Report an issue once and name its other locations in the description.
 3. Write a 3-5 sentence summary of the overall risk and what to fix first."""
 
 LATER_STEPS = """2. Leave additional_findings empty. Write a 1-2 sentence summary of the most important confirmed items here."""

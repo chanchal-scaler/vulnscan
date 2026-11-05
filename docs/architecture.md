@@ -134,7 +134,7 @@ Findings are turned into **items**: the units Claude reviews. Each item is a pai
   - Raw stdout is saved as `claude-<n>.json`, and the result is read from `structured_output`.
 - **Prompt** (`PROMPT`):
   - It treats repo content as untrusted, asks for a verdict on every item, and explains `advisories` and `hits`/`samples` items.
-  - Batch 1 gets `FIRST_STEPS`: find up to 10 issues scanners miss (SSRF, IDOR/authz, authentication bypass, deserialization, command injection, mass assignment), plus a 3–5 sentence summary.
+  - Batch 1 gets `FIRST_STEPS`: find up to 10 issues scanners miss (SSRF, IDOR/authz, authentication bypass, deserialization, command injection, mass assignment), plus a 3–5 sentence summary. It must check every route module for missing authentication or authorization, not stop in one area. SSRF is also traced back from outbound HTTP calls. If the app calls an LLM, Claude also checks for prompt injection into prompts that decide something, unsanitised LLM output, client-chosen model/tokens/path or LLM proxies, missing auth or rate limits on LLM endpoints, and personal data sent to LLM providers or tracing tools.
   - Later batches get `LATER_STEPS`: no additional findings, and a 1–2 sentence summary.
   - With several batches, the prompt says "batch n of N".
 - **`SCHEMA`** (the JSON schema Claude's output must match):

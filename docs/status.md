@@ -71,7 +71,7 @@ Last updated 2026-11-04. Update this file whenever the deployment or the code's 
 | Issue | Impact | Notes |
 |---|---|---|
 | Claude marks an unused dependency `confirmed`, at a lower severity, even when its reason says the package isn't imported | Dependency noise in the confirmed list | Tighten the prompt: unused → `false_positive`. Seen in testing (`requests`, `urllib3`). |
-| Claude's own review is shallow on large repos | Issues no scanner flags (IDOR, authz, SSRF) are mostly missed in monoliths | Backlog: deep review |
+| Claude's own review is shallow on large repos | Issues no scanner flags (IDOR, authz, SSRF) are mostly missed in monoliths | Backlog: deep review. On 2026-11-05 the batch-1 prompt gained sink-first SSRF tracing and an LLM-app checklist, after a manual review found issues the scan missed ([decisions.md](decisions.md)). Not yet run with real Claude. |
 | Grouped rules are judged from 5 samples | A confirmed group may include false positives, and a dismissed group may hide a real hit | `reviewed_as` in the CSV marks these |
 | More than 400 items on the biggest repo (637 critical/high items there) | The least severe dependency items stay untriaged | `--max-triage 700` covers them, at the cost of time and quota |
 | semgrep's full runtime on the biggest repo hasn't been measured | It may need more than 30 minutes | Use `VULNSCAN_TOOL_TIMEOUT=3600`; note the time after the next run |

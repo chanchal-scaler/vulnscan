@@ -32,7 +32,7 @@ Documentation:
 | Vulnerable dependencies | osv-scanner (every repo, every lockfile ecosystem) | Known CVEs in gems (`Gemfile.lock`), npm/yarn packages, pip requirements, Go modules, Maven `pom.xml` |
 | Hardcoded secrets | gitleaks (every repo), plus semgrep and checkov secret rules | Private keys, cloud credentials, API keys, OAuth tokens. Values are redacted before they reach disk. |
 | Infrastructure misconfiguration | checkov (Terraform, Dockerfiles, GitHub Actions, Helm) | Open security groups, IMDSv1, unencrypted storage, containers running as root |
-| Issues scanners miss | Claude's own code review | SSRF, missing authorization and IDOR, authentication bypass, mass assignment. See [What Claude does](#what-claude-does) for limits. |
+| Issues scanners miss | Claude's own code review | SSRF, missing authorization and IDOR, authentication bypass, mass assignment. In apps that call an LLM: prompt injection into prompts that grade or decide, unsanitised LLM output, client-chosen models or LLM proxies, personal data sent to LLM providers. See [What Claude does](#what-claude-does) for limits. |
 
 Stacks are detected from marker files:
 - **Rails:** `Gemfile` plus `config/application.rb`
@@ -74,7 +74,7 @@ Findings are grouped and prioritised first, so the important ones are reviewed e
 - **Order:** critical and high come first. Within each severity band: secrets, then code, then configuration, then dependencies.
 - **Limits:** Claude reviews 100 items per call, up to 400 items per scan (`--max-triage`). Anything beyond that is listed as "Not triaged".
 
-**2. Its own review: limited.** In the first batch only, Claude also looks for up to 10 high-impact issues scanners usually miss, starting from routes and controllers. On small repos this finds real issues; in testing it found an SSRF, a `pickle.loads` remote code execution and controllers without authentication. On large monoliths it can only read a small part of the code, so coverage there comes mostly from the scanners.
+**2. Its own review: limited.** In the first batch only, Claude also looks for up to 10 high-impact issues scanners usually miss, starting from routes and controllers (checking every route module for missing authentication), and for SSRF also from every outbound HTTP call. On small repos this finds real issues; in testing it found an SSRF, a `pickle.loads` remote code execution and controllers without authentication. On large monoliths it can only read a small part of the code, so coverage there comes mostly from the scanners.
 
 Claude never runs code, never tests the live app, and its results can differ between runs.
 
