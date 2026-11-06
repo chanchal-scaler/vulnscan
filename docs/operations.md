@@ -53,13 +53,14 @@ vulnscan-build && install -m 755 /opt/vulnscan-src/deploy/host/vulnscan-build /u
 ## Run a scan
 
 ```bash
-vulnscan scan KingsGambitLab/<repo>                              # default branch
+vulnscan scan KingsGambitLab/<repo>                              # default branch, with the deep review
 VULNSCAN_TOOL_TIMEOUT=3600 vulnscan scan KingsGambitLab/<repo>   # big repos: give semgrep longer than 30 minutes
 vulnscan scan scaler-hq/<repo> --ref <branch> --max-triage 600   # other flags: see README
-vulnscan scan KingsGambitLab/<repo> --deep-review --deep-path app/controllers/api --claude-budget 20
+vulnscan scan KingsGambitLab/<repo> --deep-path app/controllers/api --claude-budget 20
+vulnscan scan KingsGambitLab/<repo> --no-deep-review             # triage and the general review only
 ```
 
-`--deep-review` adds Claude's whole-codebase SSRF and access-control review. It takes hours on a monolith and uses far more of the Claude plan's allowance, which the token owner shares, so narrow it with `--deep-path` and cap it with `--claude-budget`. The report's "Deep review" line and "batches not reviewed" section show what it covered. Because the scan runs in a detached container, the session ending doesn't stop it.
+Every scan includes Claude's whole-codebase SSRF, LLM and access-control review unless you pass `--no-deep-review` (or `--no-llm`). It takes hours on a monolith and uses far more of the Claude plan's allowance, which the token owner shares, so narrow it with `--deep-path` and cap it with `--claude-budget`. The report's "Deep review" line and "batches not reviewed" section show what it covered. Because the scan runs in a detached container, the session ending doesn't stop it.
 
 - The wrapper prints `running in container <id>` and streams the progress.
 - **Ctrl-C** stops following the output, not the scan.

@@ -48,10 +48,10 @@ def _run_tools(repo, stacks, raw_dir):
 
 
 def scan(spec, ref=None, use_llm=True, model=None, max_triage=400, keep_clone=False,
-         deep_review=False, deep_paths=(), claude_budget=None):
+         deep_review=True, deep_paths=(), claude_budget=None):
     """Scan a repo and write reports. Returns (report_path, open severity counts).
 
-    deep_review adds Claude's per-class review of the whole codebase (deep_review.py), limited to
+    deep_review (on by default, and only with use_llm) adds Claude's per-class review of the whole codebase (deep_review.py), limited to
     deep_paths if given. claude_budget caps the scan's Claude usage, in USD at API rates.
     """
     with checkout(spec, ref, keep_clone) as (repo, label):

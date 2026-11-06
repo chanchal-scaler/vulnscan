@@ -13,7 +13,7 @@ vulnscan/                  Python package (stdlib only, Python 3.9+)
   installer.py             finds scanners on PATH or installs them (pip venv, gem, GitHub release with checksum)
   findings.py              Finding dataclass, severity normalisation, sort order
   triage.py                groups findings into items, batches them, runs headless Claude, maps verdicts back; Budget
-  deep_review.py           opt-in --deep-review: Claude's per-class review of the whole codebase (SSRF by sink, access control by area)
+  deep_review.py           the deep review (on by default, --no-deep-review): Claude's per-class review of the whole codebase (SSRF and LLM use by sink, access control by area)
   validate.py              stage 2: seeds a scan's open critical/high findings into Strix (GLM via OpenRouter), 20 per pass, collects its artifacts, writes validation reports
   fix.py                   stage 3: Claude fixes each validated finding on its own branch; vulnscan pushes it and opens a draft PR
   report.py                writes report.json, report.csv and report.md
@@ -47,7 +47,7 @@ docs/                      this documentation
    - Each tool's status (`ok`, `failed`, `not applicable` or `install failed`), count and errors go into the report.
 5. **Sort and number:** findings are sorted by `findings.sort_key` (final severity, then file, then line) and numbered `F001…`.
 6. **Triage** (unless `--no-llm`): `triage.triage(non-info findings, …, max_items, budget)` sets `f.triage` on each reviewed finding, then runs Claude's own review, and returns the summary, Claude's own findings and the triage metadata. Findings are then re-sorted, since severities may have changed. One `Budget` (`--claude-budget`, default no cap) is shared by every Claude call in the scan.
-7. **Deep review** (with `--deep-review`): `deep_review.deep_review(…)` runs after triage with the same budget. Its findings are appended to Claude's own, and its metadata goes into `report.json` as `deep_review`. See [below](#deep-review-deep_reviewpy).
+7. **Deep review** (unless `--no-deep-review` or `--no-llm`): `deep_review.deep_review(…)` runs after triage with the same budget. Its findings are appended to Claude's own, and its metadata goes into `report.json` as `deep_review`. See [below](#deep-review-deep_reviewpy).
 8. **Reports:** `report.write_reports()` writes the three report files. The CLI prints open counts by severity (from `severity_counts`, which excludes false positives and duplicates and includes Claude's own findings) and the report path.
 
 ## Findings (`findings.py`)
@@ -197,7 +197,7 @@ One more `_run_claude` call after the batches, with `REVIEW_PROMPT` and `REVIEW_
 
 ## Deep review (`deep_review.py`)
 
-Opt-in with `vulnscan scan --deep-review`, after triage. The general review reads what Claude chooses in one session, which on a monolith is a small part of the code. Here vulnscan decides coverage. It lists everything one issue class needs checked, splits it into batches, and gives Claude one batch per `_run_claude` call, with `REVIEW_SCHEMA` and the same `_RULES` and `_SEVERITY_GUIDE` as triage. Calls run one at a time.
+On by default in `vulnscan scan`, after triage. `--no-deep-review` skips it, and so does `--no-llm`; the CLI refuses `--deep-review` with `--no-llm`, and `--deep-path` when the deep review is off (exit 2). The general review reads what Claude chooses in one session, which on a monolith is a small part of the code. Here vulnscan decides coverage. It lists everything one issue class needs checked, splits it into batches, and gives Claude one batch per `_run_claude` call, with `REVIEW_SCHEMA` and the same `_RULES` and `_SEVERITY_GUIDE` as triage. Calls run one at a time.
 
 1. **Inventory** (`_inventory`): walks the repo with the prompt-injection check's `_files`/`_read`, so it skips the same folders, binary files and files over 2 MB. It also skips paths matching `LOW_VALUE_PATH` (tests, vendored, examples, docs) and, with `--deep-path`, anything not under one of those prefixes. It reads code files by extension (`.rb`, `.py`, `.js`/`.ts` and variants, `.go`, `.java`, `.kt`, `.php`) and never runs anything.
    - **Outbound HTTP call sites** (`_HTTP_CALL`, per language): lines that call an HTTP client, such as Net::HTTP, Faraday, HTTParty, `URI.open`, requests, httpx, `urlopen`, fetch, axios, `http.Get` or RestTemplate. They also include calls to libraries that fetch the URLs inside content they render or load, which make requests with no HTTP call in the app's own code:
@@ -206,18 +206,29 @@ Opt-in with `vulnscan scan --deep-review`, after triage. The general review read
      - LangChain web loaders.
 
      The SSRF prompt has Claude trace the rendered content (can users put URLs or markup into it?) and check for restrictions such as a custom `url_fetcher`. Import, `require` and comment lines don't count, and neither do JS files under browser paths (`assets/`, `javascript/`, `public/`, `static/`, `client/`, `frontend/`, `components/`).
+   - **LLM call sites** (`_LLM_CALL`, per language): lines that create an LLM client or call one (OpenAI and Azure OpenAI, Anthropic, Bedrock `invoke_model`/`converse`, Gemini `generate_content`, LiteLLM, the Vercel AI SDK, LangChain chat models and prompt templates, RubyLLM, Spring AI, Prism). They also include lines that build a prompt: system and user messages (`"role": "user"`, `SystemMessage(`), Python f-string prompts (`…prompt… = f"…"`) and `…PROMPT.format(`. Apps usually call the LLM in one wrapper, so the wrapper alone doesn't show where untrusted text goes in. The same import, comment and browser-path exclusions apply as for HTTP calls.
    - **Request-handler files** (`_HANDLER`, per language): Rails `*_controller.rb` or a class inheriting a `…Controller`, Grape and Sinatra routes, Flask/FastAPI route decorators, `APIRouter`, Django views (`def …(request`, `View`/`ViewSet` classes), Express routes, NestJS `@Controller`, Next.js route handlers, Go `HandleFunc` and router methods, Spring `@…Mapping`, Laravel controllers.
 2. **SSRF pass** (`SSRF_PROMPT`): call sites in path order, up to `SITES_PER_BATCH = 25` per call, listed as `file: lines`. Claude traces each URL, host and scheme back, including through stored data and jobs. A call counts as safe only with a fixed host, an allowlist, or a resolved-IP check on every request including redirects. It skips browser code, reports verified SSRF with entry point, who can reach it and what an attacker could reach, and says in its summary which sites it couldn't trace. Raw output: `claude-deep-ssrf-<n>.json`.
-3. **Access-control pass** (`ACCESS_PROMPT`): handler files sorted by folder, packed into batches of about `LINES_PER_BATCH = 4000` lines (a bigger file gets a batch of its own). Claude first learns the app's authentication and authorization mechanism and routes. It then checks every action for missing authentication (including skipped filters and filters that don't halt), missing authorization, IDOR (unscoped lookups by request id) and mass assignment. It reports one issue per root cause, and says in its summary which files it reviewed fully. Other kinds of issue are reported only when high or critical and not already reported. The first real run, with no scanner findings passed, drifted into injection, XSS and cookie settings for half its 24 issues. Raw output: `claude-deep-access-<n>.json`.
-4. **No repeats:** each call gets `_reported`, which is the general review's findings, the scanner findings Claude didn't dismiss in that batch's files, and the deep findings so far in those files (up to 80).
-5. **Results:** each issue becomes one of Claude's own findings, with `found_in: "deep review: SSRF"` or `"deep review: access control"`. They're numbered `C…` with the rest, and validated by Strix like the rest. `deep_review` in `report.json` has:
+3. **LLM pass** (`LLM_PROMPT`): LLM call sites batched the same way as SSRF, 25 per call. Claude follows what goes into each prompt and where the output goes, through callers, wrappers, jobs and stored data. It checks for:
+   - prompt injection into outputs that decide something, with no separation and no check outside the LLM, including second-order injection through stored text and retrieval;
+   - data the model can be talked into revealing (secrets, reference solutions, rubrics, other users' data);
+   - tool calls made from LLM output without an allowlist;
+   - output rendered as HTML or markdown for others, or passed into SQL, a shell, URLs or eval. When the output is rendered in another codebase, Claude says so;
+   - client-chosen models, LLM proxies and missing limits (cost abuse);
+   - personal data sent unredacted to providers or tracing tools.
+
+   The app's own prompts and what the model might say aren't findings. The prompt adds a severity line for LLM issues: changing a score, grade, assessment or hiring decision, leaking solutions or rubrics, or driving actions is high. Personal data sent to a provider is low unless the wrong people can read it there. Raw output: `claude-deep-llm-<n>.json`.
+4. **Access-control pass** (`ACCESS_PROMPT`): handler files sorted by folder, packed into batches of about `LINES_PER_BATCH = 4000` lines (a bigger file gets a batch of its own). Claude first learns the app's authentication and authorization mechanism and routes. It then checks every action for missing authentication (including skipped filters and filters that don't halt), missing authorization, IDOR (unscoped lookups by request id) and mass assignment. It reports one issue per root cause, and says in its summary which files it reviewed fully. Other kinds of issue are reported only when high or critical and not already reported. The first real run, with no scanner findings passed, drifted into injection, XSS and cookie settings for half its 24 issues. Raw output: `claude-deep-access-<n>.json`.
+5. **Order:** SSRF, then LLM, then access control. Access control has by far the most batches, so it runs last, and a `--claude-budget` cut falls on it rather than on the two small passes.
+6. **No repeats:** each call gets `_reported`, which is the general review's findings, the scanner findings Claude didn't dismiss in that batch's files, and the deep findings so far in those files (up to 80).
+7. **Results:** each issue becomes one of Claude's own findings, with `found_in: "deep review: SSRF"`, `"deep review: LLM"` or `"deep review: access control"`. They're numbered `C…` with the rest, and validated by Strix like the rest. Strix can rarely prove an LLM finding from the code alone, because its sandbox has none of the app's LLM keys, so give it a live target with `--url`. `deep_review` in `report.json` has:
    - `paths` and `cost_usd`;
-   - for `ssrf`: `files`, `call_sites`, `batches`, `done`, `skipped`, `failed` and `summaries`;
+   - for `ssrf` and `llm`: `files`, `call_sites`, `batches`, `done`, `skipped`, `failed` and `summaries`;
    - for `access`: `files`, `lines` and the same batch fields.
 
-   Batches are named by their files (SSRF) or folders (access).
+   Batches are named by their files (SSRF and LLM) or folders (access).
 
-SQL injection, command injection, deserialization, XSS and open redirects get no pass: the scanners find their sinks, and triage verifies them. On the largest local Rails app (2026-11-06), listing took 6 s and found 220 call sites in 94 files and 1,358 handler files (136,550 lines), which comes to 10 SSRF and 37 access-control batches.
+SQL injection, command injection, deserialization, XSS and open redirects get no pass: the scanners find their sinks, and triage verifies them. On the largest local Rails app (2026-11-06), listing took 6 s and found 220 call sites in 94 files and 1,358 handler files (136,550 lines), which comes to 10 SSRF and 37 access-control batches. The LLM pass adds 60 call sites in 31 files there (3 batches), and 212 in 79 files on a local copy of the scaler backend (9 batches, next to 5 SSRF and 4 access-control batches).
 
 ## Validation stage (`validate.py`)
 
@@ -292,10 +303,10 @@ Safety:
 
 ## Reports (`report.py`)
 
-- **`report.json`:** the scan metadata (`repo`, `commit`, `scanned_at`, `stacks`, `tools`, `triage`, and `deep_review` with `--deep-review`), plus `summary`, `findings` (each `Finding` as a dict, including `triage`) and `additional_findings`. `additional_findings` are sorted by severity before any file is written. Every file, `validate.py` and the dashboard number them `C01…` in that order, so an id always names the same finding.
+- **`report.json`:** the scan metadata (`repo`, `commit`, `scanned_at`, `stacks`, `tools`, `triage`, and `deep_review` when the deep review ran), plus `summary`, `findings` (each `Finding` as a dict, including `triage`) and `additional_findings`. `additional_findings` are sorted by severity before any file is written. Every file, `validate.py` and the dashboard number them `C01…` in that order, so an id always names the same finding.
 - **`report.csv`:** the columns in `CSV_COLUMNS` (described in the [README](../README.md#outputs)). Claude's own findings come first as `C01…`. Every value goes through `_csv_value`, which guards against formula injection.
 - **`report.md`:**
-  - It starts with the scan details, tool status and summary. With `--deep-review`, the details include a "Deep review" line (batches done of each pass, how much code they covered, skips, failures, cost). A "Deep review: batches not reviewed" section lists each skipped or failed batch.
+  - It starts with the scan details, tool status and summary. When the deep review ran, the details include a "Deep review" line (batches done of each pass, how much code they covered, skips, failures, cost). A "Deep review: batches not reviewed" section lists each skipped or failed batch.
   - **Confirmed:** a table, then one details section per finding. Group members share one section headed with the group ID, saying "and N more (see report.csv)".
   - Then Claude's own findings (`C01…`, each deep-review one with a "Found in" line), needs review (table with reason), not triaged (table), and dismissed (table with reason).
 

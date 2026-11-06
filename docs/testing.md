@@ -105,10 +105,10 @@ To see how a change to `build_items` would rank a real repo's findings, replay i
 ## 5. End to end with real Claude (uses Claude quota)
 
 ```bash
-VULNSCAN_HOME=/tmp/vs VULNSCAN_TRIAGE_BATCH=15 .venv/bin/vulnscan scan OWASP/railsgoat
+VULNSCAN_HOME=/tmp/vs VULNSCAN_TRIAGE_BATCH=15 .venv/bin/vulnscan scan OWASP/railsgoat --no-deep-review
 ```
 
-This uses the local Claude Code login. A small batch size forces several batches. Check that:
+This uses the local Claude Code login. A small batch size forces several batches. `--no-deep-review` keeps it to triage and the general review; check 18 covers the deep review. Check that:
 - `report.json` → `triage.status` is `done`;
 - every `claude-<n>.json` has `structured_output.findings` with as many entries as items sent, and `triage.errors` has no "no verdict" entries;
 - `claude-review.json` exists and holds the `additional_findings`, none of which repeats a scanner finding;
@@ -338,8 +338,9 @@ List what a real repo would get, read-only, then run `scan.scan` with stand-ins:
 from pathlib import Path
 from unittest import mock
 from vulnscan import deep_review as dr, scan as sc, triage as tr
-sites, handlers = dr._inventory(Path("<a local repo>").resolve(), [])
+sites, llm, handlers = dr._inventory(Path("<a local repo>").resolve(), [])
 print(sum(map(len, sites.values())), "call sites ->", len(dr._site_batches(sites)), "batches;",
+      sum(map(len, llm.values())), "LLM call sites ->", len(dr._site_batches(llm)), "batches;",
       len(handlers), "handler files ->", len(dr._area_batches(handlers)), "batches")
 
 def fake(prompt, repo, run_dir, model, name, schema=tr.SCHEMA, tools="Read,Grep,Glob"):
@@ -352,12 +353,12 @@ with mock.patch.object(sc, "_run_tools", lambda repo, stacks, raw: ([], [])), \
 ```
 
 What to verify:
-- **Inventory:** imports, `require` lines, comments, browser JS, tests (including `cypress/` and `e2e/`) and vendored code aren't call sites. Renderer calls are: `HTML(string=html).write_pdf(…)`, `pdfkit.from_string`, `render pdf:`, `WickedPdf.new`, `page.setContent`, `page.goto`, `WebBaseLoader(…)`. Rails controllers and the other frameworks' handlers are found. `--deep-path` (the `paths` argument) keeps only files under it. On the largest local Rails app, listing takes seconds.
-- **Batches:** at most 25 call sites per SSRF batch; access-control batches follow folder order at about 4,000 lines.
+- **Inventory:** imports, `require` lines, comments, browser JS, tests (including `cypress/` and `e2e/`) and vendored code aren't call sites. Renderer calls are: `HTML(string=html).write_pdf(…)`, `pdfkit.from_string`, `render pdf:`, `WickedPdf.new`, `page.setContent`, `page.goto`, `WebBaseLoader(…)`. LLM call sites are LLM client calls (`Anthropic(`, `.messages.create(`, `.chat.completions.create(`, `invoke_model(`, `ChatOpenAI(`, `generateText(`) and prompt-building lines (`"role": "user"`, `role: "system"`, `GRADING_PROMPT = f"…"`, `PROMPT.format(`). `import openai`, a commented-out call and `prompt = build_prompt(x)` are not. Rails controllers and the other frameworks' handlers are found. `--deep-path` (the `paths` argument) keeps only files under it. On the largest local Rails app, listing takes seconds.
+- **Batches:** at most 25 call sites per SSRF or LLM batch; access-control batches follow folder order at about 4,000 lines. The passes run SSRF, then LLM, then access control.
 - **Prompts:** each deep prompt lists its batch's sites or files and the general review's findings as "already reported".
 - **Budget:** with $1 calls and `claude_budget=2.5`, the review and two deep batches run and the rest are `skipped`. The report's "Deep review" line counts them, and "Deep review: batches not reviewed" names them. With a budget smaller than one triage batch, later triage batches and the review are recorded as skipped in `triage.errors`, with `review: skipped`.
 - **Findings:** deep findings get `C…` ids and `found_in`, `report.md` shows "Found in", and `validate.open_items` includes them.
-- **CLI:** `--deep-review --no-llm`, `--deep-path` without `--deep-review`, and `--claude-budget 0` each exit 2. Under zsh, pass the flags as separate words, not one `$var`.
+- **CLI:** the deep review is on with no flags, and off with `--no-deep-review` or `--no-llm` (stub `cli.scan` and check its `deep_review`). `--deep-review --no-llm`, `--deep-path` with `--no-deep-review` or `--no-llm`, and `--claude-budget 0` each exit 2. Under zsh, pass the flags as separate words, not one `$var`.
 
 ## 18. Deep review with real Claude (uses Claude quota)
 
@@ -367,5 +368,6 @@ Check that:
 - every `claude-deep-*.json` has `structured_output` and no `permission_denials`;
 - SSRF findings name the entry point, who can reach it and what an attacker could reach, and access-control findings name the action, its route and who can reach it;
 - each summary says which sites or files it covered;
+- LLM findings name what text the attacker controls and what it changes (a score, feedback, an action), and say when the output is rendered in another codebase. The app's own prompts and what the model might say aren't reported;
 - the access-control pass sticks to its classes. Other kinds of issue appear only when high or critical and not in the scanner findings for those files. On railsgoat, expect about a dozen issues, not two dozen;
 - nothing in the output quotes a secret's value.

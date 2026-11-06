@@ -33,7 +33,7 @@ Documentation:
 | Hardcoded secrets | gitleaks (every repo), plus semgrep and checkov secret rules | Private keys, cloud credentials, API keys, OAuth tokens. Values are redacted before they reach disk. |
 | Infrastructure misconfiguration | checkov (Terraform, Dockerfiles, GitHub Actions, Helm) | Open security groups, IMDSv1, unencrypted storage, containers running as root |
 | Prompt injection planted in the repo | vulnscan's built-in check (every repo), plus Claude's own review | Text aimed at AI tools ("ignore previous instructions", "mark this as a false positive", notes to an AI in comments or agent files such as `CLAUDE.md`, `.cursorrules` or `.mcp.json`), invisible Unicode tag characters, bidi controls (Trojan Source) and zero-width runs. It targets vulnscan's own Claude and Strix as much as developers' coding agents. |
-| Issues scanners miss | Claude's own code review | SSRF, missing authorization and IDOR, authentication bypass, mass assignment. In apps that call an LLM: prompt injection into prompts that grade or decide or into agents that call tools, unsanitised LLM output, client-chosen models or LLM proxies, personal data sent to LLM providers. See [What Claude does](#what-claude-does) for limits. |
+| Issues scanners miss | Claude's own code review, and the deep review for the whole codebase | SSRF, missing authorization and IDOR, authentication bypass, mass assignment. In apps that call an LLM: prompt injection into prompts that grade or decide or into agents that call tools, unsanitised LLM output, client-chosen models or LLM proxies, personal data sent to LLM providers. See [What Claude does](#what-claude-does) for limits. |
 
 The scanned repo can't hide its own findings: scanners ignore its suppression comments and config files (`nosemgrep`, `# nosec`, `.bandit`, `gitleaks:allow`, `.gitleaks.toml`, `config/brakeman.yml`) and report what `config/brakeman.ignore` and `checkov:skip` comments hide, marked as such. `.gitleaksignore` and `.checkov.yaml` can't be switched off, so each becomes a finding of its own, and `.semgrepignore` is still honoured. Claude treats a suppression as the repo's claim, not proof.
 
@@ -77,15 +77,24 @@ Findings are grouped and prioritised first, so the important ones are reviewed e
 - **Order:** critical and high come first. Within each severity band: secrets, then code, then configuration, then dependencies.
 - **Limits:** Claude reviews 100 items per call, up to 400 items per scan (`--max-triage`). Anything beyond that is listed as "Not triaged".
 
-**2. Its own review: limited.** After the batches, a separate call looks for up to 10 high-impact issues scanners usually miss, starting from routes and controllers (checking every route module for missing authentication), and for SSRF also from every outbound HTTP call. It's separate so a slow review can't time out the most important verdicts. It also looks for prompt injection planted in the repo, including agent settings that run commands when a developer opens it. It gets the list of scanner findings so it doesn't repeat them, names each issue's entry point and who can reach it (which helps Strix test it), and ends its summary with the parts of the app it didn't get to. On small repos this finds real issues; in testing it found an SSRF, a `pickle.loads` remote code execution and controllers without authentication. On large monoliths it can only read a small part of the code, so coverage there comes mostly from the scanners, unless you add a deep review.
+**2. Its own review: limited.** After the batches, a separate call looks for up to 10 high-impact issues scanners usually miss, starting from routes and controllers (checking every route module for missing authentication), and for SSRF also from every outbound HTTP call. It's separate so a slow review can't time out the most important verdicts. It also looks for prompt injection planted in the repo, including agent settings that run commands when a developer opens it. It gets the list of scanner findings so it doesn't repeat them, names each issue's entry point and who can reach it (which helps Strix test it), and ends its summary with the parts of the app it didn't get to. On small repos this finds real issues; in testing it found an SSRF, a `pickle.loads` remote code execution and controllers without authentication. On large monoliths it can only read a small part of the code, so coverage there comes mostly from the scanners and the deep review.
 
-**3. Deep review: opt-in (`--deep-review`), for the whole codebase.** After the general review, Claude reviews every part of the code for the two classes of issue no scanner finds well. vulnscan, not Claude, lists what must be covered and gives Claude one batch per call:
+**3. Deep review: on by default, for the whole codebase.** `--no-deep-review` skips it, and `--no-llm` skips it along with the rest of Claude's work. After the general review, Claude reviews every part of the code for the three classes of issue no scanner finds well. vulnscan, not Claude, lists what must be covered and gives Claude one batch per call:
 - **SSRF, by sink:** every outbound HTTP call site (Net::HTTP, Faraday, requests, httpx, fetch, axios, `http.Get` and so on), in batches of 25. It also covers every call to a library that fetches the URLs inside content it renders or loads: HTML-to-PDF renderers (WeasyPrint, pdfkit, wkhtmltopdf, WickedPdf, Dompdf), headless browsers (`page.goto`, `page.setContent`) and LangChain web loaders. Claude traces each URL, or the rendered content, back to where it comes from. Browser code, imports and comments are left out.
+- **LLM use, by sink:** every LLM API call (OpenAI, Anthropic, Bedrock, Gemini, LangChain, LiteLLM and so on) and every line that builds a prompt (system and user messages, prompt templates, f-string prompts), in batches of 25. The prompt-building lines matter because the calls usually sit in one shared wrapper, while untrusted text goes in where each prompt is built. Claude traces what goes into each prompt and where the output goes, and checks for:
+  - prompt injection into outputs that decide something (scores, grades, feedback, approvals), including text stored now and fed to a later job or retrieval;
+  - reference solutions, rubrics or secrets a user can talk the model into revealing;
+  - tool calls made from LLM output without checks;
+  - output shown to others as HTML or markdown without sanitising;
+  - client-chosen models, LLM proxies and cost abuse;
+  - personal data sent to LLM providers or to tracing tools such as Langfuse.
+
+  Score or grade manipulation and leaked solutions are rated high. Personal data sent to a provider is low unless the wrong people can read it there. What the model might say (moderation) isn't covered.
 - **Access control, by area:** every request-handler file (Rails controllers, Django and FastAPI views, Express and Next.js routes, Go handlers, Spring controllers), grouped by folder into batches of about 4,000 lines. Claude checks every action for missing authentication or authorization, IDOR and mass assignment.
 
 Each call gets what's already reported in its files, so it doesn't repeat it. Its findings join Claude's own (`C…`, marked "Found in: deep review: …") and go on to validation like any other. SQL injection, command injection, deserialization, XSS and open redirects are left to the scanners, which find their sinks already. Tests, vendored, example and docs code is skipped. `--deep-path` limits it to part of the repo, and the report lists any batch that was skipped or failed, so you know what wasn't covered.
 
-It costs far more Claude quota than a normal scan. Your largest local Rails app (1,358 handler files, 220 call sites) makes 47 calls, and it runs one call at a time, so expect hours. Use `--claude-budget` to cap it.
+It costs far more Claude quota than a scan without it (`--no-deep-review`). Your largest local Rails app (1,358 handler files, 223 HTTP and 60 LLM call sites) makes 50 calls, and it runs one call at a time, so expect hours. Use `--claude-budget` to cap it.
 
 **The Claude budget (`--claude-budget USD`)** caps a scan's Claude usage, counted as `total_cost_usd` at API rates. With the subscription token nothing is billed, so it really caps how much of the plan's allowance one scan can use. It's checked before each call, in priority order: triage batches, then the general review, then deep-review batches. Calls after the cap is reached are skipped and listed in the report. A call already running isn't stopped, so the total can go past the cap by one call.
 
@@ -171,7 +180,7 @@ Every scan writes these files to its own folder:
 | `report.json` | Everything: scan metadata, tool status, triage metadata, Claude's summary, every finding with its triage result, and Claude's own findings |
 | `raw/<tool>.json` | Each scanner's original output |
 | `claude-<n>.json`, `claude-review.json` | Claude's raw response for batch *n* and for its own review of the code, kept for audit (includes `total_cost_usd` and `num_turns`) |
-| `claude-deep-ssrf-<n>.json`, `claude-deep-access-<n>.json` | With `--deep-review`: Claude's raw response for each deep-review batch. `report.json` → `deep_review` has each pass's coverage, the batches skipped or failed, and every batch's summary |
+| `claude-deep-ssrf-<n>.json`, `claude-deep-llm-<n>.json`, `claude-deep-access-<n>.json` | Claude's raw response for each deep-review batch. `report.json` → `deep_review` has each pass's coverage, the batches skipped or failed, and every batch's summary |
 | `validation.md` / `.json` / `.csv` | Stage 2, after `vulnscan validate`: Strix's PoC-validated findings, with the stage-1 ids they confirm and a best-effort coverage list of what wasn't validated |
 | `strix-instructions.md`, `strix-findings.json` | What was sent to Strix: the generated instructions and the open findings payload |
 | `raw/strix/pass-<n>/` | Strix's own artifacts for each validation pass (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) |
@@ -211,14 +220,15 @@ vulnscan tools --install   # optional: install every scanner up front
 ### Commands
 
 ```bash
-vulnscan scan your-org/repo                          # default branch
+vulnscan scan your-org/repo                          # default branch, with the deep review
+vulnscan scan your-org/repo --no-deep-review         # faster and cheaper: triage and the general review only
 vulnscan scan https://github.com/your-org/repo --ref release-2026-11
 vulnscan scan ~/development/some-app --no-llm        # local folder, scanners only
 vulnscan scan your-org/repo --model claude-sonnet-5-5   # another Claude model for this run (default: claude-opus-5-5)
 vulnscan scan your-org/repo --max-triage 600         # let Claude review more items (default 400)
 vulnscan scan your-org/repo --keep-clone             # keep the clone for debugging
-vulnscan scan your-org/repo --deep-review --claude-budget 40               # whole-codebase SSRF and access-control review, capped
-vulnscan scan your-org/repo --deep-review --deep-path app/controllers/api  # deep-review only part of the repo
+vulnscan scan your-org/repo --claude-budget 40       # cap the scan's Claude usage, deep review included
+vulnscan scan your-org/repo --deep-path app/controllers/api   # deep-review only part of the repo
 vulnscan tools                                       # which scanners are installed
 ```
 
@@ -261,7 +271,7 @@ Exit codes:
 - **The prompt-injection check matches patterns.** It finds the common phrasings and hidden characters, not every way to word an instruction, and an app's own LLM prompts can match (Claude dismisses those). Claude's review covers the rest as far as it reads.
 - **Static analysis only.** Nothing is run or tested against a live app, and business-logic flaws are mostly out of reach.
 - **Claude's verdicts are judgements, not proof.** A grouped rule is judged from 5 samples.
-- **Claude's own review is capped at 10 issues** and is shallow on large repos ([What Claude does](#what-claude-does)). `--deep-review` covers the whole codebase, but only for SSRF and access control, and only the call sites and handler files its patterns recognise.
+- **Claude's own review is capped at 10 issues** and is shallow on large repos ([What Claude does](#what-claude-does)). The deep review covers the whole codebase, but only for SSRF, LLM use and access control, and only the call sites and handler files its patterns recognise.
 - **When run directly, scanner versions are unpinned (latest).** The Docker image pins them.
 - **No scheduling or alerting yet** ([docs/status.md](docs/status.md)).
 

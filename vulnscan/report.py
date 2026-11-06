@@ -30,6 +30,7 @@ def _deep_line(deep):
     """One line on what the deep review covered, e.g. 'SSRF: 3 of 3 batches over 61 call sites; ...'."""
     parts = []
     for key, name, count, unit in (("ssrf", "SSRF", "call_sites", "outbound HTTP call sites"),
+                                   ("llm", "LLM", "call_sites", "LLM call sites"),
                                    ("access", "access control", "files", "request-handler files")):
         m = deep[key]
         text = f"{name}: {m['done']} of {m['batches']} batch(es) over {m[count]} {unit}"
@@ -130,7 +131,7 @@ def write_reports(run_dir, meta, findings, triage_result):
         "## Tools",
         *tools,
     ]
-    missed = [(name, label) for key, name in (("ssrf", "SSRF"), ("access", "access control")) if deep
+    missed = [(name, label) for key, name in (("ssrf", "SSRF"), ("llm", "LLM"), ("access", "access control")) if deep
               for label in deep[key]["skipped"] + deep[key]["failed"]]
     if missed:
         md += ["", f"## Deep review: batches not reviewed ({len(missed)})",
