@@ -20,8 +20,9 @@ TRIAGE_BATCH = int(os.environ.get("VULNSCAN_TRIAGE_BATCH", "100"))  # items per 
 CLAUDE_MODEL = "claude-opus-5-5"
 
 # Stage 2 (validation with Strix).
-VALIDATE_TIMEOUT = int(os.environ.get("VULNSCAN_VALIDATE_TIMEOUT", "7200"))  # one Strix run
-VALIDATE_BUDGET = float(os.environ.get("VULNSCAN_VALIDATE_BUDGET", "25"))  # max LLM spend in USD
+VALIDATE_TIMEOUT = int(os.environ.get("VULNSCAN_VALIDATE_TIMEOUT", "7200"))  # one Strix run (one pass)
+VALIDATE_BUDGET = float(os.environ.get("VULNSCAN_VALIDATE_BUDGET", "25"))  # max LLM spend in USD, per pass
+VALIDATE_PASS = 20  # findings per Strix run: the critical and high ones are sent in passes of this size
 
 # Variables scanners may see. Everything else (GITHUB_TOKEN, CLAUDE_CODE_OAUTH_TOKEN,
 # AWS_* and so on) is withheld so a tool can never leak it.

@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 
-from .config import CLAUDE_MODEL, log
+from .config import CLAUDE_MODEL, VALIDATE_PASS, log
 from .dashboard import serve
 from .fix import FixError, fix
 from .installer import InstallError, ensure, find
@@ -40,7 +40,7 @@ def _cmd_validate(args):
     try:
         report, counts = validate(
             args.repo, run_dir=args.run, ref=args.ref, urls=args.url or [], model=args.model,
-            scan_mode=args.scan_mode, budget=args.budget, max_items=args.max_validate,
+            scan_mode=args.scan_mode, budget=args.budget,
             instructions=args.instruction or [], only=args.only or [],
         )
     except (RepoError, ValidateError) as e:
@@ -122,21 +122,21 @@ def main(argv=None):
     t.add_argument("--install", action="store_true", help="install every missing scanner")
     t.set_defaults(func=_cmd_tools)
 
-    v = sub.add_parser("validate", help="stage 2: validate a scan's open findings with Strix (GLM via OpenRouter)")
+    v = sub.add_parser("validate", help="stage 2: validate a scan's open critical and high findings with Strix "
+                                        f"(GLM via OpenRouter), {VALIDATE_PASS} per pass")
     v.add_argument("repo", help="the repo that was scanned: org/repo, a GitHub URL, or a local path")
     v.add_argument("--run", help="stage-1 run folder with report.json (default: the latest for this repo)")
     v.add_argument("--ref", help="branch or tag to clone (default: the repo's default branch)")
     v.add_argument("--url", action="append", help="live target to also test, e.g. the staging deployment "
                                                   "(repeatable; only systems you are authorised to test)")
-    v.add_argument("--max-validate", type=int, default=100,
-                   help="max open findings to send, worst first (default: 100)")
     v.add_argument("--only", action="append", metavar="ID",
-                   help="validate only this open stage-1 finding, e.g. F003 or C01 (repeatable). Adds to the "
-                        "results already in validation.json instead of replacing them")
+                   help="validate only this open stage-1 finding, of any severity, e.g. F003 or C01 (repeatable). "
+                        "Adds to the results already in validation.json")
     v.add_argument("--scan-mode", choices=["quick", "standard", "deep"], default="standard",
                    help="Strix scan depth (default: standard)")
     v.add_argument("--budget", type=float,
-                   help="max LLM spend in USD for the whole run (default: VULNSCAN_VALIDATE_BUDGET, 25; 0 = no cap)")
+                   help=f"max LLM spend in USD for each pass of {VALIDATE_PASS} findings "
+                        "(default: VULNSCAN_VALIDATE_BUDGET, 25; 0 = no cap)")
     v.add_argument("--model", help=f"model id for Strix, in LiteLLM format (default: STRIX_LLM or {DEFAULT_MODEL})")
     v.add_argument("--instruction", action="append",
                    help="extra instruction for Strix, e.g. test credentials (repeatable)")

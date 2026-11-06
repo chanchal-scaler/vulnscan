@@ -7,9 +7,10 @@ LLM_API_KEY).
 
 vulnscan clones the repo itself with its own token handling and passes the local
 directory as the target, so the GitHub token never reaches Strix or its sandbox. The
-open findings from the stage-1 report are seeded as an instruction file and a workspace
-file. Strix's artifacts are copied to raw/strix/ and normalised into validation.md,
-validation.json and validation.csv in the same run folder.
+open critical and high findings from the stage-1 report are sent in passes of
+VALIDATE_PASS, each pass a separate Strix run seeded with an instruction file and a
+workspace file. Each pass's artifacts are copied to raw/strix/pass-<n>/ and normalised
+into validation.md, validation.json and validation.csv in the same run folder.
 
 Only point --url at systems you are authorised to test: Strix actively probes every
 target it is given.
@@ -25,7 +26,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import SCANS_DIR, VALIDATE_BUDGET, VALIDATE_TIMEOUT, log
+from .config import SCANS_DIR, VALIDATE_BUDGET, VALIDATE_PASS, VALIDATE_TIMEOUT, log
 from .findings import SEVERITIES, normalize_severity
 from .report import _cell, _csv_value
 from .repo import RepoError, checkout, git_env, git_head, parse_github
@@ -349,26 +350,33 @@ def _write_reports(run_dir, meta, findings, items):
             row.update({"validates": ", ".join(f["validates"]), "poc": f["poc"], "fix": f["fix"]})
             out.writerow({k: _csv_value(v) for k, v in row.items()})
 
-    s = meta["strix"]
+    passes = meta.get("passes") or []
     md = [
         f"# Validation: {meta['repo']}",
         "",
-        f"- Validated: {meta['validated_at']}"
-        + (f" (--only {', '.join(meta['only'])}; validated findings from earlier runs on this scan are kept)"
-           if meta.get("only") else ""),
+        f"- Validated: {meta['validated_at']}" + (f" (--only {', '.join(meta['only'])})" if meta.get("only") else ""),
         f"- Stage-1 scan: {meta['run']}" + (f" (commit `{meta['stage1_commit']}`)" if meta.get("stage1_commit") else ""),
         f"- Commit: `{meta['commit'] or 'n/a'}`",
-        f"- Model: {meta['model']} · mode: {meta['scan_mode']} · budget: ${meta['budget_usd']}",
+        f"- Model: {meta['model']} · mode: {meta['scan_mode']} · budget: ${meta['budget_usd']} per pass",
         f"- Live targets: {', '.join(meta['urls']) or 'none'}",
-        f"- Strix: {s['status']}" + (f", exit {s['exit_code']}" if s.get("exit_code") is not None else "")
-        + (f", ${s['cost_usd']:.2f} at API rates" if s.get("cost_usd") is not None else "")
-        + (f", {s['duration_s']}s, artifacts in raw/strix/" if s.get("exit_code") is not None else ""),
     ]
-    for err in s.get("errors") or []:
-        md.append(f"  - error: {_cell(err, 300)}")
+    if passes:
+        cost = sum(p.get("cost_usd") or 0 for p in passes)
+        md.append(f"- Strix: {len(passes)} pass(es) of up to {VALIDATE_PASS} findings, ${cost:.2f} in all at API rates,"
+                  " artifacts in `raw/strix/pass-<n>/`")
+    else:
+        md.append(f"- Strix: {meta['strix']['status']}")
+    for p in passes:
+        md.append(f"  - Pass {p['pass']}: {len(p.get('sent') or [])} finding(s), {p['status']}"
+                  + (f", exit {p['exit_code']}" if p.get("exit_code") is not None else "")
+                  + (f", ${p['cost_usd']:.2f}" if p.get("cost_usd") is not None else "")
+                  + (f", {p['duration_s']}s" if p.get("duration_s") is not None else ""))
+        for err in p.get("errors") or []:
+            md.append(f"    - error: {_cell(err, 300)}")
 
-    if not items:
-        md += ["", "Nothing to validate: every stage-1 finding was dismissed as a false positive or duplicate."]
+    if not items and not passes:
+        md += ["", "Nothing to validate: no open critical or high stage-1 findings"
+                   " (false positives and duplicates aren't sent)."]
     else:
         if findings:
             md += ["", f"## Validated findings ({len(findings)})",
@@ -411,21 +419,99 @@ def _counts(findings):
     return {s: c[s] for s in SEVERITIES if c[s]}
 
 
-def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="standard",
-             budget=None, max_items=100, instructions=(), only=()):
-    """Validate a finished scan's open findings (or only those in `only`) with Strix (GLM via OpenRouter).
+def _run_pass(exe, env, repo, run_dir, n, items, urls, instructions, model, scan_mode, budget):
+    """Run Strix once over `items`, as pass `n`. Returns (findings without ids, pass metadata, error or None)."""
+    # Strix mounts the target directory into its sandbox container through the host's
+    # Docker daemon, so the path must exist at the same location outside this process.
+    # On the instance the run folder sits on the scans volume, which is mounted into
+    # the vulnscan container at the same path on both sides. The copy also protects
+    # the original: Strix mounts targets writable, so every pass gets a fresh copy.
+    target = run_dir / "strix-target"
+    shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(repo, target, symlinks=True)
 
-    With `only`, the validated findings already in validation.json are kept and new ones are
-    numbered after them, so existing V ids (and the fix branches named after them) never change.
+    scratch = run_dir / "strix"
+    shutil.rmtree(scratch, ignore_errors=True)  # every pass starts clean
+    scratch.mkdir(parents=True)
+
+    payload = run_dir / "strix-findings.json"
+    payload.write_text(json.dumps(items, indent=2))
+    instructions_path = _write_instructions(run_dir, items, urls, instructions)
+
+    cmd = [exe, "-n", "--target", str(target)]
+    cmd += [part for url in urls for part in ("--target", url)]
+    cmd += ["--instruction-file", str(instructions_path),
+            "--workspace-file", f"{payload}:findings.json",
+            "--scan-mode", scan_mode, "--scope-mode", "full"]
+    if budget and budget > 0:
+        cmd += ["--max-budget", str(budget)]
+
+    try:
+        log(f"validation: pass {n}: running strix on {len(items)} finding(s) ({model}, {scan_mode} mode, "
+            f"budget ${budget}) — deep mode can take hours")
+        started = time.time()
+        exit_code, error = _run_strix(cmd, scratch, env)
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+    raw = run_dir / "raw" / "strix" / f"pass-{n}"
+    shutil.rmtree(raw, ignore_errors=True)
+    runs = scratch / "strix_runs"
+    artifacts = (max((d for d in runs.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)
+                 if runs.is_dir() else None)
+    if artifacts:
+        shutil.copytree(artifacts, raw)
+    else:
+        error = error or "strix produced no artifacts (no strix_runs/ directory)"
+
+    strix = {"pass": n, "sent": [it["id"] for it in items], "status": None, "exit_code": exit_code,
+             "cost_usd": None, "duration_s": int(time.time() - started), "errors": []}
+    strix.update(_load_run_meta(raw))
+    if strix["status"] is None:  # no run.json (or no status): derive it
+        strix["status"] = "failed" if exit_code in (1, None) else "completed"
+
+    findings = _load_findings(raw)
+    if exit_code == 2 and not findings:
+        # exit 2 means Strix found vulnerabilities; if none parsed, its artifacts
+        # weren't readable, and "no validated findings" would be a lie.
+        error = error or f"strix exited 2 (findings found) but none could be parsed from raw/strix/pass-{n}/"
+    if error:
+        strix["errors"] = [error]
+    order = {s: i for i, s in enumerate(SEVERITIES)}
+    findings.sort(key=lambda f: (order.get(f["severity"], 4), f["file"], f["line"] or 0))
+    return findings, strix, error
+
+
+def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="standard",
+             budget=None, instructions=(), only=()):
+    """Validate a finished scan's open critical and high findings (or only those in `only`) with Strix.
+
+    They're sent VALIDATE_PASS at a time, worst first, each pass a separate Strix run with its own
+    budget, timeout and context. Every pass adds to validation.json: earlier findings are kept and
+    new ones are numbered after them, so existing V ids (and the fix branches named after them)
+    never change, and a re-run carries on with the findings not sent yet. A failed pass stops the
+    run, and the findings it didn't validate count as not sent, so a re-run tries them again.
 
     Returns (validation_md_path, severity counts of this run's validated findings). Raises
-    ValidateError/RepoError on bad input, or after writing partial reports if Strix failed.
+    ValidateError/RepoError on bad input, or after writing partial reports if a pass failed.
     """
     model = model or os.environ.get("STRIX_LLM") or DEFAULT_MODEL
     budget = VALIDATE_BUDGET if budget is None else budget
     label = _label_for(spec)
     run_dir = _resolve_run_dir(label, run_dir)
     report = json.loads((run_dir / "report.json").read_text())
+
+    earlier = None
+    if (run_dir / "validation.json").is_file():
+        earlier = json.loads((run_dir / "validation.json").read_text())
+    kept, sent, passes = [], set(), []
+    if earlier is not None:
+        kept = earlier.get("findings") or []
+        passes = earlier.get("passes") or []
+        cov = earlier.get("coverage") or {}
+        # A validation.json written before --only existed has no "sent": its run sent the worst `items_sent`.
+        sent = set(cov.get("sent") or [it["id"] for it in open_items(report, earlier.get("items_sent") or 0)])
+
     wanted = sorted({i.strip().upper() for i in only if i.strip()})
     if wanted:
         items = [it for it in open_items(report, None, collapse=False) if it["id"] in wanted]
@@ -434,29 +520,26 @@ def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="stand
             raise ValidateError(f"no open finding {', '.join(sorted(unknown))} in {run_dir}/report.json"
                                 " (false positives, duplicates and info findings aren't validated)")
     else:
-        items = open_items(report, max_items)
+        items = [it for it in open_items(report, None)
+                 if it["severity"] in ("critical", "high") and it["id"] not in sent]
 
-    earlier = None
-    if wanted and (run_dir / "validation.json").is_file():
-        earlier = json.loads((run_dir / "validation.json").read_text())
-    kept, sent_items = [], items
-    if earlier is not None:
-        kept = earlier.get("findings") or []
-        cov = earlier.get("coverage") or {}
-        # A validation.json written before --only existed has no "sent": its run sent the worst `items_sent`.
-        sent = set(cov.get("sent") or [it["id"] for it in open_items(report, earlier.get("items_sent") or 0)])
-        sent_items = [it for it in open_items(report, None, collapse=False) if it["id"] in sent | set(wanted)]
+    def sent_items():
+        return [it for it in open_items(report, None, collapse=False) if it["id"] in sent]
 
     meta = {
         "repo": label, "commit": None, "stage1_commit": report.get("commit"),
         "validated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "run": run_dir.name, "model": model, "scan_mode": scan_mode, "budget_usd": budget,
-        "urls": list(urls), "items_sent": len(sent_items), "only": wanted or None,
+        "urls": list(urls), "items_sent": len(sent_items()), "only": wanted or None, "passes": passes,
         "strix": {"status": "skipped", "exit_code": None, "cost_usd": None, "duration_s": None, "errors": []},
     }
 
     if not items:
-        log("validation: nothing to validate (every finding was dismissed); skipping Strix")
+        if earlier is not None:
+            log("validation: every open critical and high finding has been sent to Strix already"
+                f" ({run_dir / 'validation.md'}); use --only to validate any other open finding")
+            return run_dir / "validation.md", {}
+        log("validation: no open critical or high findings; skipping Strix")
         return _write_reports(run_dir, meta, [], []), {}
 
     exe = shutil.which("strix")
@@ -466,85 +549,39 @@ def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="stand
 
     parsed = None if Path(spec).expanduser().is_dir() else parse_github(spec)
     with checkout(spec, ref) as (repo, _label):
-        # Re-validating renumbers V001…, which would no longer match the fix branches and PRs
-        # named after them. fix only runs on GitHub repos, so only those can have such branches.
-        # --only adds after the existing ids instead, so it needs no check.
+        # Without a validation.json, numbering starts again at V001, so ids would no longer match
+        # fix branches and PRs named after an earlier validation's. fix only runs on GitHub repos,
+        # so only those can have such branches. With one, new ids follow the existing ones.
         pushed = _fix_branches(repo, run_dir.name, git_env(parsed[0])) if parsed and earlier is None else []
         if pushed:
             raise ValidateError(
                 f"{run_dir.name} already has fix branches on GitHub ({', '.join(pushed[:3])}"
-                f"{', …' if len(pushed) > 3 else ''}): re-validating would renumber its V ids so they no longer match"
-                " those branches and PRs. Validate single findings with --only (it keeps the existing V ids),"
-                " run a new scan and validate that, or delete those branches first")
+                f"{', …' if len(pushed) > 3 else ''}) but no validation.json: validating again would give"
+                " their V ids to different findings. Run a new scan and validate that, or delete those branches first")
         head = git_head(repo)
         meta["commit"] = head
         if report.get("commit") and head != report["commit"]:
             log(f"warning: validating commit {head or '?'}; stage 1 scanned {report['commit']}")
 
-        # Strix mounts the target directory into its sandbox container through the host's
-        # Docker daemon, so the path must exist at the same location outside this process.
-        # On the instance the run folder sits on the scans volume, which is mounted into
-        # the vulnscan container at the same path on both sides. The copy also protects
-        # the original: Strix mounts targets writable.
-        target = run_dir / "strix-target"
-        shutil.rmtree(target, ignore_errors=True)
-        shutil.copytree(repo, target, symlinks=True)
-
-        scratch = run_dir / "strix"
-        shutil.rmtree(scratch, ignore_errors=True)  # a re-validation starts clean
-        scratch.mkdir(parents=True)
-
-        payload = run_dir / "strix-findings.json"
-        payload.write_text(json.dumps(items, indent=2))
-        instructions_path = _write_instructions(run_dir, items, urls, instructions)
-
-        cmd = [exe, "-n", "--target", str(target)]
-        cmd += [part for url in urls for part in ("--target", url)]
-        cmd += ["--instruction-file", str(instructions_path),
-                "--workspace-file", f"{payload}:findings.json",
-                "--scan-mode", scan_mode, "--scope-mode", "full"]
-        if budget and budget > 0:
-            cmd += ["--max-budget", str(budget)]
-
-        try:
-            log(f"validation: running strix on {len(items)} finding(s) ({model}, {scan_mode} mode, "
-                f"budget ${budget}) — deep mode can take hours")
-            started = time.time()
-            exit_code, error = _run_strix(cmd, scratch, env)
-        finally:
-            shutil.rmtree(target, ignore_errors=True)
-
-        raw = run_dir / "raw" / "strix"
-        shutil.rmtree(raw, ignore_errors=True)
-        runs = scratch / "strix_runs"
-        artifacts = (max((d for d in runs.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)
-                     if runs.is_dir() else None)
-        if artifacts:
-            shutil.copytree(artifacts, raw)
-        else:
-            error = error or "strix produced no artifacts (no strix_runs/ directory)"
-
-        meta["strix"].update(_load_run_meta(raw))
-        if meta["strix"]["status"] is None:  # no run.json (or no status): derive it
-            meta["strix"]["status"] = "failed" if exit_code in (1, None) else "completed"
-        meta["strix"].update(exit_code=exit_code, duration_s=int(time.time() - started))
-        if error:
-            meta["strix"]["errors"] = [error]
-
-        findings = _load_findings(raw)
-        if exit_code == 2 and not findings:
-            # exit 2 means Strix found vulnerabilities; if none parsed, its artifacts
-            # weren't readable, and "no validated findings" would be a lie.
-            error = error or "strix exited 2 (findings found) but none could be parsed from raw/strix/"
-        order = {s: i for i, s in enumerate(SEVERITIES)}
-        findings.sort(key=lambda f: (order.get(f["severity"], 4), f["file"], f["line"] or 0))
-        for i, f in enumerate(findings, len(kept) + 1):
-            f["id"] = f"V{i:03d}"
-            f["validates"] = _validates(f)
-        log(f"validation: {len(findings)} validated finding(s)"
-            + (f", plus {len(kept)} kept from earlier runs" if kept else ""))
-
-        path = _write_reports(run_dir, meta, kept + findings, sent_items)
-        if error:
-            raise ValidateError(f"{error}; partial results in {path}")
-        return path, _counts(findings)
+        batches = [items[i:i + VALIDATE_PASS] for i in range(0, len(items), VALIDATE_PASS)]
+        log(f"validation: {len(items)} finding(s) to validate, in {len(batches)} pass(es) of up to {VALIDATE_PASS}")
+        new = []
+        for k, batch in enumerate(batches, 1):
+            findings, strix, error = _run_pass(exe, env, repo, run_dir, len(passes) + 1, batch, urls,
+                                               instructions, model, scan_mode, budget)
+            for i, f in enumerate(findings, len(kept) + 1):
+                f["id"] = f"V{i:03d}"
+                f["validates"] = _validates(f)
+            referenced = {i for f in findings for i in f["validates"]}
+            # After a failure, only what this pass validated counts as sent; a re-run retries the rest.
+            sent |= {it["id"] for it in batch if not error or it["id"] in referenced}
+            kept, new = kept + findings, new + findings
+            passes.append(strix)
+            meta.update(strix=strix, items_sent=len(sent_items()))
+            log(f"validation: pass {k} of {len(batches)} done: {len(findings)} validated finding(s)"
+                + (f", ${strix['cost_usd']:.2f} at API rates" if strix.get("cost_usd") is not None else ""))
+            path = _write_reports(run_dir, meta, kept, sent_items())
+            if error:
+                raise ValidateError(f"{error}; pass {k} of {len(batches)} failed, so the run stopped."
+                                    f" Partial results in {path}; run validate again to carry on")
+        return path, _counts(new)

@@ -4,7 +4,7 @@ vulnscan is a Python CLI that scans one GitHub repo for security issues:
 - It detects the repo's stacks and runs the scanners that fit (semgrep, osv-scanner, gitleaks, checkov, brakeman, bandit, gosec), plus its own built-in check for prompt injection planted in the repo.
 - It merges their output into one finding format.
 - It uses Claude Code (headless, read-only), pinned to Claude Opus 5.5 (`config.CLAUDE_MODEL`), to verify the findings and look for issues scanners miss. With `--deep-review` (opt-in, costly in quota), Claude also checks every outbound HTTP call for SSRF and every request handler for access control, in batches vulnscan decides. `--claude-budget` caps a scan's Claude usage.
-- `vulnscan validate` (stage 2) re-checks a scan's open findings with Strix, whose agents run in Strix's own Docker sandbox and report only findings with a working PoC; its LLM is GLM 5.3 via OpenRouter.
+- `vulnscan validate` (stage 2) re-checks a scan's open critical and high findings, 20 per Strix run, with Strix, whose agents run in Strix's own Docker sandbox and report only findings with a working PoC; its LLM is GLM 5.3 via OpenRouter.
 - `vulnscan fix` (stage 3) has Claude Code fix each Strix-validated finding in a throwaway clone, then opens one draft PR per finding.
 - It writes `report.md`, `report.json` and `report.csv` (plus `validation.*` after stage 2 and `fix.*` after stage 3).
 - `vulnscan dashboard` serves a read-only web page that tracks each run's findings through the three stages. On the instance it runs in its own container, reached through Session Manager port forwarding.

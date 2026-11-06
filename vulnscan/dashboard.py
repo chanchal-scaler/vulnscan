@@ -155,7 +155,7 @@ def _run_data(run_dir):
         elif r.get("group") in sent_as:
             r["strix"] = f"grouped with {sent_as[r['group']]}, which was sent"
         else:
-            r["strix"] = "not sent"  # beyond --max-validate, or not picked with --only
+            r["strix"] = "not sent"  # medium or low, not reached yet, or not picked with --only
     rows.sort(key=lambda r: SEV_ORDER.get(r["severity"], 2))
     data["open"] = rows
     return data

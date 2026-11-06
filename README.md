@@ -93,22 +93,23 @@ Claude never runs code, never tests the live app, and its results can differ bet
 
 ## Validation (stage 2)
 
-Detection is only the first stage. `vulnscan validate` re-checks a finished scan's **open findings** (confirmed, needs review and not triaged — not Claude's false positives or duplicates) with [Strix](https://github.com/usestrix/strix), an open-source agentic pentesting harness. Strix runs inside its own Docker sandbox, where it reads the code, stands the app up and probes it, reporting only what it can validate with a working proof-of-concept. Its LLM is GLM 5.3 via OpenRouter.
+Detection is only the first stage. `vulnscan validate` re-checks a finished scan's **open critical and high findings** (confirmed, needs review and not triaged — not Claude's false positives or duplicates) with [Strix](https://github.com/usestrix/strix), an open-source agentic pentesting harness. Strix runs inside its own Docker sandbox, where it reads the code, stands the app up and probes it, reporting only what it can validate with a working proof-of-concept. Its LLM is GLM 5.3 via OpenRouter.
 
-- **Seeding:** the open findings from the scan's `report.json` become an instruction file and a workspace file, so Strix validates *your* detected issues (worst first, capped by `--max-validate`) instead of re-scanning from scratch. A rule or package Claude judged as one group is sent once, as its first hit outside tests and vendored code, so a noisy rule can't crowd out the rest. Dependencies come after everything else, and `info` findings aren't sent. Strix is asked to start each title with the ids it validates, like `[F012, C03]`, or `[new]`, and to work through the list in order.
+- **Seeding:** the open findings from the scan's `report.json` become an instruction file and a workspace file, so Strix validates *your* detected issues (worst first) instead of re-scanning from scratch. A rule or package Claude judged as one group is sent once, as its first hit outside tests and vendored code, so a noisy rule can't crowd out the rest. Dependencies come after everything else, and `info` findings aren't sent. Strix is asked to start each title with the ids it validates, like `[F012, C03]`, or `[new]`, and to work through the list in order.
+- **Passes of 20:** only critical and high findings are sent (Claude's re-rated severity where there is one), 20 at a time. Each pass is a separate Strix run with its own budget (`--budget`, per pass), its own timeout and a fresh context, so a long list doesn't starve the findings at the end. One command runs every pass, and each pass adds to `validation.json` as it finishes. Medium and low findings are validated only when named with `--only`.
 - **Targets:** the repo is cloned by vulnscan itself and passed to Strix as a local directory, so the GitHub token never reaches Strix or its sandbox. `--url` adds a live target (e.g. the staging deployment) — only systems you are authorised to test.
 - **Model:** `--model`, or `STRIX_LLM`, defaults to `openrouter/z-ai/glm-5.3`; the OpenRouter key goes in `LLM_API_KEY` (or `OPENROUTER_API_KEY`). Strix only reports a finding it could actually reproduce.
-- **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
-- **Re-validating** the same scan writes new `V…` ids. That's refused once `vulnscan fix` has pushed branches for the scan, because they're named after the old ids. Run a new scan instead, which is also what checks the fixes.
-- **`--only F003`** validates just that open finding (repeat it for several; `C01` works too, and so does any hit of a group). It adds to `validation.json` instead of replacing it: earlier validated findings keep their `V…` ids and new ones get the next ids, so it still works after fix PRs exist. A false positive, duplicate, `info` finding or unknown ID is an error (exit 2), caught before anything is cloned. Validating the same finding again adds a second `V…` id rather than replacing the first. Run one validate per scan at a time.
+- **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts for each pass (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/pass-<n>/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
+- **Re-running** validate on the same scan carries on with the critical and high findings no pass has been sent yet, and says so when there are none. Earlier validated findings keep their `V…` ids and new ones get the next ids, so it still works after fix PRs exist. A failed pass (Strix exit 1, a timeout, unreadable artifacts) stops the command; the findings it didn't validate count as not sent, so the next run tries them again. To validate everything again, run a new scan, which is also what checks the fixes.
+- **`--only F003`** validates just that open finding, of any severity (repeat it for several; `C01` works too, and so does any hit of a group). Like a pass, it adds to `validation.json`. A false positive, duplicate, `info` finding or unknown ID is an error (exit 2), caught before anything is cloned. Validating the same finding again adds a second `V…` id rather than replacing the first. Run one validate per scan at a time.
 - **On the instance:** it runs like a scan. The wrapper gives **validate containers only** the Docker socket (Strix starts its pentest sandbox on the host daemon — the one deliberate exception to the hardened container), reads the OpenRouter key from Parameter Store, and refuses to run while it's still the placeholder. The repo copy Strix tests is placed in the run folder, on the path mounted on both sides.
 
 ```bash
-vulnscan validate your-org/repo                          # latest scan, repo + GLM 5.3
+vulnscan validate your-org/repo                          # latest scan: every critical/high finding, 20 per pass
 vulnscan validate your-org/repo --url https://staging.example.com
-vulnscan validate your-org/repo --scan-mode deep --max-validate 200
-vulnscan validate your-org/repo --instruction "login: user/pass" --budget 10
-vulnscan validate your-org/repo --only F003              # just one open finding (repeat --only for more)
+vulnscan validate your-org/repo --scan-mode deep
+vulnscan validate your-org/repo --instruction "login: user/pass" --budget 10   # $10 per pass
+vulnscan validate your-org/repo --only F003              # just one open finding, any severity (repeat --only for more)
 ```
 
 Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https://strix.ai/install | bash`) and `LLM_API_KEY`. A `quick` mode run takes minutes; `deep` can take hours. On the instance the image contains Strix at a pinned version and the wrapper fetches the key from Parameter Store (`/vulnscan/openrouter-token`, [deploy/README.md](deploy/README.md#add-the-tokens)); see [docs/operations.md](docs/operations.md#run-a-validation-stage-2).
@@ -173,7 +174,7 @@ Every scan writes these files to its own folder:
 | `claude-deep-ssrf-<n>.json`, `claude-deep-access-<n>.json` | With `--deep-review`: Claude's raw response for each deep-review batch. `report.json` → `deep_review` has each pass's coverage, the batches skipped or failed, and every batch's summary |
 | `validation.md` / `.json` / `.csv` | Stage 2, after `vulnscan validate`: Strix's PoC-validated findings, with the stage-1 ids they confirm and a best-effort coverage list of what wasn't validated |
 | `strix-instructions.md`, `strix-findings.json` | What was sent to Strix: the generated instructions and the open findings payload |
-| `raw/strix/` | Strix's own artifacts for the validation run (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) |
+| `raw/strix/pass-<n>/` | Strix's own artifacts for each validation pass (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) |
 | `fix.md` / `fix.json` | Stage 3, after `vulnscan fix`: one row per validated finding that any fix run on this scan handled, with its status (`pr opened`, `committed (dry run)`, `not fixed`, `skipped`, `failed`), its PR link or the reason, and when it ran |
 | `fix/` | Each fix's commit as `<V id>.patch`, and Claude's raw response as `claude-<V id>.json` |
 
@@ -242,8 +243,8 @@ Exit codes:
 | `VULNSCAN_TRIAGE_BATCH` | `100` | Items per Claude call. Smaller values mean more calls. |
 | `LLM_API_KEY` | none | OpenRouter key for stage-2 validation (Strix + GLM 5.3). `OPENROUTER_API_KEY` also works. |
 | `STRIX_LLM` | `openrouter/z-ai/glm-5.3` | Model id for Strix, LiteLLM format. `--model` overrides it. |
-| `VULNSCAN_VALIDATE_TIMEOUT` | `7200` | Seconds before a Strix validation run is stopped |
-| `VULNSCAN_VALIDATE_BUDGET` | `25` | Max LLM spend in USD for one validation run (`--budget`, `0` = no cap) |
+| `VULNSCAN_VALIDATE_TIMEOUT` | `7200` | Seconds before a Strix validation pass is stopped |
+| `VULNSCAN_VALIDATE_BUDGET` | `25` | Max LLM spend in USD for each validation pass of 20 findings (`--budget`, `0` = no cap) |
 
 ## How long a scan takes
 
