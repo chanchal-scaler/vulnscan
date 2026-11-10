@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 HOME = Path(os.environ.get("VULNSCAN_HOME", Path.home() / ".vulnscan")).expanduser()
@@ -46,4 +47,4 @@ def scanner_env():
 
 
 def log(message):
-    print(f"[vulnscan] {message}", file=sys.stderr, flush=True)
+    print(f"[vulnscan {time.strftime('%H:%M:%S')}] {message}", file=sys.stderr, flush=True)

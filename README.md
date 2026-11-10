@@ -105,30 +105,32 @@ Claude never runs code, never tests the live app, and its results can differ bet
 Detection is only the first stage. `vulnscan validate` re-checks a finished scan's **open critical and high findings** (confirmed, needs review and not triaged — not Claude's false positives or duplicates) with [Strix](https://github.com/usestrix/strix), an open-source agentic pentesting harness. Strix runs inside its own Docker sandbox, where it reads the code, stands the app up and probes it, reporting only what it can validate with a working proof-of-concept. Its LLM is GLM 5.3 via OpenRouter.
 
 - **Seeding:** the open findings from the scan's `report.json` become an instruction file and a workspace file, so Strix validates *your* detected issues (worst first) instead of re-scanning from scratch. A rule or package Claude judged as one group is sent once, as its first hit outside tests and vendored code, so a noisy rule can't crowd out the rest. Dependencies come after everything else, and `info` findings aren't sent. Strix is asked to start each title with the ids it validates, like `[F012, C03]`, or `[new]`, and to work through the list in order.
-- **Passes of 20:** only critical and high findings are sent (Claude's re-rated severity where there is one), 20 at a time. Each pass is a separate Strix run with its own budget (`--budget`, per pass), its own timeout and a fresh context, so a long list doesn't starve the findings at the end. One command runs every pass, and each pass adds to `validation.json` as it finishes. Medium and low findings are validated only when named with `--only`.
+- **LLM findings:** Claude's findings from the deep review's LLM pass are labelled for Strix, which is told to load its LLM skills and prove an effect through the app, such as a grade that changes with the payload over a few runs, and never to test by volume. Strix's sandbox has none of the app's LLM keys, so most of these can only be validated against a live target: `--url` plus test credentials in `--instruction`.
+- **Passes of 20:** only critical and high findings are sent (Claude's re-rated severity where there is one), 20 at a time. Each pass is a separate Strix run with its own budget (`--budget`, per pass), its own timeout and a fresh context, so a long list doesn't starve the findings at the end. One command runs every pass, and `validation.json` is updated as each pass finishes. Medium and low findings are validated only when named with `--only`.
 - **Targets:** the repo is cloned by vulnscan itself and passed to Strix as a local directory, so the GitHub token never reaches Strix or its sandbox. `--url` adds a live target (e.g. the staging deployment) — only systems you are authorised to test.
 - **Model:** `--model`, or `STRIX_LLM`, defaults to `openrouter/z-ai/glm-5.3`; the OpenRouter key goes in `LLM_API_KEY` (or `OPENROUTER_API_KEY`). Strix only reports a finding it could actually reproduce.
 - **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts for each pass (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/pass-<n>/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
-- **Re-running** validate on the same scan carries on with the critical and high findings no pass has been sent yet, and says so when there are none. Earlier validated findings keep their `V…` ids and new ones get the next ids, so it still works after fix PRs exist. A failed pass (Strix exit 1, a timeout, unreadable artifacts) stops the command; the findings it didn't validate count as not sent, so the next run tries them again. To validate everything again, run a new scan, which is also what checks the fixes.
-- **`--only F003`** validates just that open finding, of any severity (repeat it for several; `C01` works too, and so does any hit of a group). Like a pass, it adds to `validation.json`. A false positive, duplicate, `info` finding or unknown ID is an error (exit 2), caught before anything is cloned. Validating the same finding again adds a second `V…` id rather than replacing the first. Run one validate per scan at a time.
+- **Re-running** validate on the same scan starts from scratch: every open critical and high finding is sent again, whatever earlier runs did, and the new results replace the old ones, with `V…` ids starting again at `V001`. The fix stage's results for that scan (`fix.md`, `fix.json`, `fix/`) are removed too, because they name findings by the old ids. The PRs stay on GitHub, and the next `fix` run finds and updates them. A failed pass (Strix exit 1, a timeout, unreadable artifacts) doesn't stop the others: the command exits 2 at the end, and that pass's findings show as not sent.
+- **`--only F003`** validates just that open finding, of any severity (repeat it for several; `C01` works too, and so does any hit of a group). It adds to the current `validation.json` instead of starting over, so its findings get the next `V…` ids. A false positive, duplicate, `info` finding or unknown ID is an error (exit 2), caught before anything is cloned. Validating the same finding again adds a second `V…` id rather than replacing the first. Run one validate per scan at a time.
 - **On the instance:** it runs like a scan. The wrapper gives **validate containers only** the Docker socket (Strix starts its pentest sandbox on the host daemon — the one deliberate exception to the hardened container), reads the OpenRouter key from Parameter Store, and refuses to run while it's still the placeholder. The repo copy Strix tests is placed in the run folder, on the path mounted on both sides.
 
 ```bash
 vulnscan validate your-org/repo                          # latest scan: every critical/high finding, 20 per pass
 vulnscan validate your-org/repo --url https://staging.example.com
-vulnscan validate your-org/repo --scan-mode deep
+vulnscan validate your-org/repo --scan-mode quick        # faster and shallower than the default, deep
 vulnscan validate your-org/repo --instruction "login: user/pass" --budget 10   # $10 per pass
 vulnscan validate your-org/repo --only F003              # just one open finding, any severity (repeat --only for more)
 ```
 
-Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https://strix.ai/install | bash`) and `LLM_API_KEY`. A `quick` mode run takes minutes; `deep` can take hours. On the instance the image contains Strix at a pinned version and the wrapper fetches the key from Parameter Store (`/vulnscan/openrouter-token`, [deploy/README.md](deploy/README.md#add-the-tokens)); see [docs/operations.md](docs/operations.md#run-a-validation-stage-2).
+Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https://strix.ai/install | bash`) and `LLM_API_KEY`. A `quick` mode run takes minutes; `deep`, the default, can take hours per pass. On the instance the image contains Strix at a pinned version and the wrapper fetches the key from Parameter Store (`/vulnscan/openrouter-token`, [deploy/README.md](deploy/README.md#add-the-tokens)); see [docs/operations.md](docs/operations.md#run-a-validation-stage-2).
 
 ## Fixing (stage 3)
 
 `vulnscan fix` takes the latest run with a `validation.json` (or `--run`) and opens **one draft pull request per Strix-validated finding** (`V001…`):
-1. vulnscan clones the repo (org allowlist and token handling as in stage 1) and creates a branch `vulnscan/fix-<run>-<V id>` from the default branch, or from `--ref`, which must be a branch.
+1. vulnscan clones the repo (org allowlist and token handling as in stage 1) and creates a branch `vulnscan/fix-<run>-<stage-1 ids>` from the default branch, or from `--ref`, which must be a branch. The branch is named after the stage-1 findings it fixes (`…-F012`, `…-C03-F012`), or `…-new-<hash>` for one Strix found on its own.
 2. Claude Code fixes that one finding. It runs restricted, as in triage, but with **Edit and Write added**. It still has no shell, web or MCP and no GitHub token, and `--restricted` refuses writes to `.git` and settings files. It's told to make the smallest change that removes the vulnerability, and to change nothing if it can't fix it safely.
 3. If Claude reports a fix and files changed, vulnscan commits as `vulnscan <vulnscan@noreply.invalid>` (git hooks never run), pushes the branch and opens a **draft** PR. The PR has Claude's summary, **steps to reproduce**, review notes and an "untested" warning. The steps are written from the validated PoC and the code, and end with the behaviour before and after the fix. They're a `curl` command against `$BASE_URL` when the issue is reachable over HTTP, and numbered steps otherwise. Hosts, credentials and secret values are always placeholders. Strix's raw PoC stays in `validation.md`.
+4. If Claude can't fix it safely and the issue is still in the code, vulnscan opens a **GitHub issue** in the repo instead. The issue has what's wrong, the steps to reproduce (placeholders again, and no raw PoC), and why there's no automated fix: what a person has to decide or do. A re-run updates that issue rather than opening another (it's matched by a hidden marker in its body, keyed like the branch). There's no issue when the code no longer has the problem, on a `--dry-run`, or while a PR from an earlier run is still open for the finding. A repo with issues turned off just gets `not fixed`.
 
 Claude is told that a fix which breaks the app is worse than no fix:
 - It must check how the app is configured and deployed before touching anything that depends on that, and prefer backwards-compatible changes. For example, it reads a secret from the environment and keeps the current value as the fallback, rather than deleting the secret.
@@ -136,14 +138,14 @@ Claude is told that a fix which breaks the app is worse than no fix:
 - Steps that must happen before merging, such as "set X in every environment" or "rotate the leaked key", appear as a checklist at the top of the PR.
 
 The rules it follows:
-- **One finding per branch.** A finding Claude can't fix gets no PR.
-- **Re-runs are safe.** A finding whose branch already exists on GitHub is skipped, so re-running on the same run folder never opens duplicate PRs. If opening the PR fails after the push, vulnscan deletes the branch again, so a re-run retries that finding rather than skipping it.
+- **One finding per branch.** A finding Claude can't fix gets an issue instead of a PR. A later run that does fix it opens a PR, and the issue stays open until someone closes it.
+- **Re-runs start from scratch, without duplicate PRs.** Every validated finding is fixed again. Its branch name stays the same after a re-validation, so if an earlier run pushed it, the new fix is force-pushed over it and its open PR's title and body are updated (`pr updated`). Commits anyone added to that branch are lost. A finding with no open PR gets a new one, and if opening it fails, the branch just pushed is deleted again.
 - **Claude sees both stages.** Besides Strix's finding and PoC, the prompt has the stage-1 findings it validates (scanner rule, location, and the triage's reason and fix). If the issue is no longer in the code, Claude changes nothing.
 - **The fixes are untested.** Claude can't run the repo's code or tests, which is why the PRs are drafts.
 - **Public repos are refused** unless you pass `--dry-run`, because a public branch or PR would disclose the vulnerability before the fix is merged. Fix those through a private security advisory instead.
 - **`--dry-run`** commits the fixes in the throwaway clone and saves them as patches in `fix/`. It pushes nothing and opens no PRs.
 - **`--only V003`** fixes just that finding; repeat it for several. An ID that isn't in the run's `validation.json` is an error (exit 2), caught before anything is cloned.
-- **`fix.md` and `fix.json` keep earlier fix runs' results** on the same scan, one row per finding with the time of its fix run. A later `skipped` never replaces an earlier result, such as its PR link. If the scan is re-validated and an ID now names a different finding, that earlier result is dropped.
+- **`fix.md` and `fix.json` describe the latest fix run,** one row per finding with the time of its fix run. A full run replaces them; an `--only` run updates the findings it names and keeps the rest. A finding Claude couldn't fix this time keeps the link to the PR an earlier run opened, if it's still open.
 
 ```bash
 vulnscan fix your-org/repo                 # latest validated run, PRs against the default branch
@@ -152,7 +154,7 @@ vulnscan fix your-org/repo --only V003     # just one validated finding (repeat 
 vulnscan fix your-org/repo --ref release-2026-11 --model opus --run ~/.vulnscan/scans/your-org__repo/20261104-114804
 ```
 
-The GitHub token must be able to push branches and open PRs: a classic PAT with `repo` and `workflow` scopes, or a fine-grained token with Contents, Pull requests and Workflows set to read and write. Without `workflow`, GitHub rejects the push of any fix that changes a file under `.github/workflows/`. On the instance the wrapper passes the same two tokens as for `scan`, and nothing else.
+The GitHub token must be able to push branches and open PRs and issues: a classic PAT with `repo` and `workflow` scopes, or a fine-grained token with Contents, Pull requests, Issues and Workflows set to read and write. Finding the issues earlier runs opened calls `GET /user`, so it needs a user's token, not a GitHub App's. Without `workflow`, GitHub rejects the push of any fix that changes a file under `.github/workflows/`. On the instance the wrapper passes the same two tokens as for `scan`, and nothing else.
 
 ## Dashboard
 
@@ -184,7 +186,7 @@ Every scan writes these files to its own folder:
 | `validation.md` / `.json` / `.csv` | Stage 2, after `vulnscan validate`: Strix's PoC-validated findings, with the stage-1 ids they confirm and a best-effort coverage list of what wasn't validated |
 | `strix-instructions.md`, `strix-findings.json` | What was sent to Strix: the generated instructions and the open findings payload |
 | `raw/strix/pass-<n>/` | Strix's own artifacts for each validation pass (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) |
-| `fix.md` / `fix.json` | Stage 3, after `vulnscan fix`: one row per validated finding that any fix run on this scan handled, with its status (`pr opened`, `committed (dry run)`, `not fixed`, `skipped`, `failed`), its PR link or the reason, and when it ran |
+| `fix.md` / `fix.json` | Stage 3, after `vulnscan fix`: one row per validated finding, with its status (`pr opened`, `pr updated`, `issue opened`, `issue updated`, `committed (dry run)`, `not fixed`, `failed`), its PR or issue link or the reason, and when it ran |
 | `fix/` | Each fix's commit as `<V id>.patch`, and Claude's raw response as `claude-<V id>.json` |
 
 `report.csv` columns:
@@ -230,12 +232,32 @@ vulnscan scan your-org/repo --keep-clone             # keep the clone for debugg
 vulnscan scan your-org/repo --claude-budget 40       # cap the scan's Claude usage, deep review included
 vulnscan scan your-org/repo --deep-path app/controllers/api   # deep-review only part of the repo
 vulnscan tools                                       # which scanners are installed
+vulnscan purge fix your-org/repo                     # list the latest run's fix results; add --yes to delete them
+vulnscan purge validate your-org/repo --yes          # delete the latest validation, and the fix results made from it
+vulnscan purge scan your-org/repo --all --yes        # delete every run folder of the repo
 ```
+
+### Progress
+
+Every stage logs what it's working on as it goes, to stderr, each line with the time:
+- **Scanners:** which one is running, then a "still running" line every minute.
+- **Claude:** the items in each triage batch, then every file each call reads, searches, edits or writes, labelled by call (`claude batch 2: Read app/models/user.rb`, `claude deep-ssrf-3: …`, `claude V004: Edit …`). Grep patterns and file contents are never logged, since they could hold a secret.
+- **Strix:** the ids in each pass, each agent as it starts and finishes, each vulnerability it reports, its errors, and a "still running" line after 10 quiet minutes.
+- **Fix:** each finding's branch, commit, push and PR.
+
+### Purging results
+
+`vulnscan purge scan|validate|fix <repo>` deletes one stage's results, together with the later stages' results that depend on them:
+- **`fix`:** `fix.md`, `fix.json` and the `fix/` patches.
+- **`validate`:** the validation reports, Strix's files and artifacts, and the fix results.
+- **`scan`:** the whole run folder.
+
+By default it covers the repo's newest run that has those results. `--run <folder>` picks another run, and `--all` covers every run. Without `--yes` it only lists what it would delete. It deletes local files only: draft PRs and `vulnscan/fix-*` branches stay on GitHub. Don't purge a run while a stage is running on it.
 
 `repo` accepts `org/repo`, `https://github.com/org/repo`, `git@github.com:org/repo.git`, or a local path.
 
 Exit codes:
-- **0:** the scan completed, whatever it found. (Also `validate`: Strix ran and its findings were read, whatever it found. And `fix`: every finding got a PR, a dry-run commit, or was skipped or not fixable.)
+- **0:** the scan completed, whatever it found. (Also `validate`: Strix ran and its findings were read, whatever it found. And `fix`: every finding got a PR or an issue, opened or updated, or a dry-run commit, or needed nothing.)
 - **2:** bad input, a repo outside the allowed orgs, a failed clone, or (for `validate`) no scan to validate, a missing key, or a failed Strix run. For `fix`: no validated run, a local folder, a public repo without `--dry-run`, no GitHub token, or any finding that failed (`fix.md` is still written).
 - **130:** interrupted.
 
@@ -243,7 +265,7 @@ Exit codes:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GITHUB_TOKEN` | none | Token that can read the repos. A classic PAT with `repo` scope covers every org its user can read; a fine-grained or GitHub App token with read-only Contents covers one owner. `vulnscan fix` also needs write access to Contents and Pull requests, plus the `workflow` scope (fine-grained: Workflows) to push fixes to GitHub Actions workflows. Passed to git through the environment, never written to `.git/config`. |
+| `GITHUB_TOKEN` | none | Token that can read the repos. A classic PAT with `repo` scope covers every org its user can read; a fine-grained or GitHub App token with read-only Contents covers one owner. `vulnscan fix` also needs write access to Contents, Pull requests and Issues, plus the `workflow` scope (fine-grained: Workflows) to push fixes to GitHub Actions workflows. Passed to git through the environment, never written to `.git/config`. |
 | `GITHUB_TOKEN_<ORG>` | none | Per-org token, used instead of `GITHUB_TOKEN` for that org's repos. The name is the org in upper case with `-` changed to `_`, e.g. `GITHUB_TOKEN_SCALER_HQ`. |
 | `VULNSCAN_GITHUB_ORG` | none (any owner) | Comma-separated orgs whose repos may be scanned; anything else is refused. Not case-sensitive. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | none | Claude authentication on a server (`claude setup-token`). Not needed where Claude Code is already signed in. |
@@ -281,7 +303,7 @@ The scanner holds read access to your code and produces a list of its weaknesses
 - **It never runs the scanned repo's code.** No `bundle install` or `npm install`; scanners read source and lockfiles only.
 - **Scanners get a stripped-down environment.** `GITHUB_TOKEN*`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_*` and anything else not on the allowlist in `config.py` are withheld.
 - **Claude is read-only.** `claude -p --restricted --tools Read,Grep,Glob --strict-mcp-config`: no shell, no file writes, no web, no MCP servers. Its working directory is the scan's output folder, so the repo's `.claude/` settings and hooks never load. The prompt tells it to treat repo content as untrusted data. GitHub tokens are removed from its environment.
-- **Except in `vulnscan fix`,** where Claude may also Edit and Write, inside a throwaway clone and the run's `fix/` folder only. It still has no shell, web, MCP or token, and `--restricted` refuses writes to `.git` and settings files. vulnscan commits and pushes. Repo content could still steer the change Claude writes, which is why every PR is a draft that a person must review. The PRs never go to public repos. They include reproduction steps with placeholders, but never Strix's raw PoC.
+- **Except in `vulnscan fix`,** where Claude may also Edit and Write, inside a throwaway clone and the run's `fix/` folder only. It still has no shell, web, MCP or token, and `--restricted` refuses writes to `.git` and settings files. vulnscan commits and pushes. Repo content could still steer the change Claude writes, which is why every PR is a draft that a person must review. The PRs and issues never go to public repos. They include reproduction steps with placeholders, but never Strix's raw PoC.
 - **Secret values are redacted** by gitleaks before they reach disk, and every Claude prompt forbids copying a secret's value, even partly, into its answer.
 - **Prompt injection aimed at vulnscan itself:** Claude and Strix are told to treat repo content as data, and the prompt-injection check reports text in the repo that tries to steer them.
 - **Files are private.** Everything is created readable by the current user only (umask 077).

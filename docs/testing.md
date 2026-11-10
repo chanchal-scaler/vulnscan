@@ -212,9 +212,9 @@ What to verify:
 - **Parsing:** `V001…` findings carry the PoC and fix. A `[F001]` title tag gives `validates: ["F001"]` even though the description names F002. A `[new]` tag gives `[]`, and a title with no tag falls back to the ids in its text (`C01`). `[F1234]` matches. Try a dict-shaped and a `file:line` location, and a `=HYPERLINK…` title: the CSV must show `'=HYPERLINK…`.
 - **Instructions:** `strix-instructions.md` asks for the `[F012, C03]` / `[new]` title tag and work in list order, and no longer asks Strix to name findings it couldn't validate.
 - **Coverage:** `validation.md` lists which sent findings Strix's findings reference.
-- **Passes:** with more than 20 critical/high findings (e.g. 44), the fake strix is called once per 20 (20, 20, 4), each with its own `--max-budget`, and `raw/strix/pass-1/`… hold each pass's artifacts. Make the fake strix count its calls and fail (exit 1) on the second: the command exits 2 after pass 2, keeping what pass 2 validated, and `coverage.sent` holds pass 1 plus only pass 2's validated ids. Run it again without the failure: it sends the rest of pass 2 and everything after, numbers passes and `V…` ids after the existing ones, and ends with every critical/high id in `coverage.sent`. A third run logs that everything is sent and leaves `validation.json` byte-for-byte unchanged. `validation.md` lists every pass with its cost, and the total.
-- **Fix-branch guard:** patch `validate.checkout` to clone a local bare repo (or yield a local folder) and pass `org/repo`. With no `validation.json`, a branch `vulnscan/fix-<run>-V001` makes it exit 2, naming the branch, before strix runs. A branch for another run doesn't. With a `validation.json`, the check is skipped and new ids follow the existing ones. A local folder skips the check.
-- **`--only`:** an unknown ID or a false positive exits 2 before anything is cloned, and `f003` matches `F003`. A medium or low ID works. Strix gets only the chosen findings. With an existing `validation.json` (including one with no `coverage.sent`), earlier `V…` findings are kept, new ones are numbered after them, and `coverage.sent`/`not_referenced`/`items_sent` cover the union. The dashboard shows each sent ID as validated or not validated, and medium/low IDs as not sent.
+- **Passes:** with more than 20 critical/high findings (e.g. 44), the fake strix is called once per 20 (20, 20, 4), each with its own `--max-budget`, and `raw/strix/pass-1/`… hold each pass's artifacts. Make the fake strix fail (exit 1) when a pass holds one chosen id: that pass is `failed`, the next pass still runs, the command exits 2 at the end, and `coverage.sent` leaves out the failed pass's ids. `validation.md` lists every pass with its cost, and the total.
+- **Starting over:** seed the run folder with an earlier `validation.json` (whose `coverage.sent` names everything), `fix.json`, `fix.md`, `fix/` and `raw/strix/pass-7/`. A run without `--only` sends every critical/high id again, numbers passes and `V…` ids from 1, deletes the fix files and `pass-7/`, and keeps `report.json` and `raw/<scanner>.json`. A second run does the same again. A report with no critical or high findings still replaces the earlier results.
+- **`--only`:** an unknown ID or a false positive exits 2 before anything is cloned, and `f003` matches `F003`. A medium or low ID works. Strix gets only the chosen findings. With an existing `validation.json` (including one with no `coverage.sent`), earlier `V…` findings are kept, new ones are numbered after them, `coverage.sent`/`not_referenced`/`items_sent` cover the union, and `fix.json` is left alone. The dashboard shows each sent ID as validated or not validated, and medium/low IDs as not sent.
 - **Errors:** missing `LLM_API_KEY` exits 2 *before* anything is cloned; a strix that exits 1 still writes partial reports and exits 2; garbage artifacts with exit 2 are an error, not "no findings"; a report with no open critical or high findings writes "nothing to validate" and skips Strix.
 - **Hygiene:** a local target is copied (Strix mounts targets writable) and the copy removed afterwards (`ls $VULNSCAN_HOME/work`).
 
@@ -230,18 +230,26 @@ Check that: every entry in `validation.json` → `passes` is `completed` with `c
 
 ## 12. Fix stage with a stand-in Claude and GitHub (no quota, nothing pushed)
 
-Patch `fix.checkout` to clone a local bare repo (`file://…/origin.git`) instead of GitHub, `fix._github` to return `{"private": True, "default_branch": "main"}` for GET and `{"html_url": …}` for POST, and `fix._run_claude` to edit a file and return `{"fixed": …, "title", "summary", "review_notes"}`. Seed a run folder with a `validation.json` holding four findings: one fixed, one with `fixed: false` that still leaves a stray file behind, one whose call raises `TriageError`, and one whose branch already exists in the bare repo. This is the pattern used on 2026-11-04.
+Patch `fix.checkout` to clone a local bare repo (`file://…/origin.git`) instead of GitHub. Patch `fix._github` to act as a small in-memory GitHub: `{"private": True, "default_branch": "main"}` for the repo, a list of PRs for `GET …/pulls?head=…&state=open`, a new PR for POST, and an update for PATCH. Patch `fix._run_claude` to edit a file and return `{"fixed": …, "title", "summary", "review_notes"}`. Seed a run folder with a `validation.json` holding findings that validate `[F001]`, `[F002, C01]` and `[F003]`, one `[new]` finding, a second one validating `[F001]`, one whose call raises `TriageError`, and one with `fixed: false` that still leaves a stray file behind.
 
 What to verify:
-- **Statuses:** `pr opened`, `not fixed`, `failed`, `skipped`; the exit code is 2 because of the failure, and `fix.md` and `fix.json` are still written.
+- **Statuses:** `pr opened`, `pr updated`, `not fixed`, `failed`; the exit code is 2 because of the failure, and `fix.md` and `fix.json` are still written.
+- **Branch names:** `…-F001-V001` and `…-F001-V005` (shared key), `…-C01-F002`, `…-new-<8 hex>`.
+- **Re-runs:** a second full run calls Claude for every finding again. Each existing branch gets a new commit (force-pushed), and its open PR is PATCHed, not POSTed again, so the PR count only grows by findings that had none. A finding not fixed this time keeps its open PR's link, and its stale `fix/<V id>.patch` is gone. Rewrite `validation.json` with the ids renumbered (as a re-validation does) and delete `fix.json`: the finding validating `[F002, C01]` still updates the same PR.
 - **Git:** only the fixed finding's branch is pushed. Its commit is authored by `vulnscan <vulnscan@noreply.invalid>`, and the "not fixed" finding's stray file is in no commit or patch.
 - **PR:** the POST is a draft against the default branch, titled `[vulnscan] …` (or `[vulnscan][breaking] …`). Its body has the "Before merging" checklist, the stage-1 ids, "Steps to reproduce" and the untested warning. It doesn't have Strix's raw `poc` text.
-- **Claude:** it's called with `Read,Grep,Glob,Edit,Write`, with `<run>/fix/` as its working directory. The skipped finding never reaches Claude.
+- **Claude:** it's called with `Read,Grep,Glob,Edit,Write`, with `<run>/fix/` as its working directory.
 - **Guards (exit 2):** a public repo without `--dry-run`, no GitHub token, a local folder, no `validation.json`. A public repo with `--dry-run` runs. An empty `validation.json` writes "Nothing to fix" and makes no GitHub or Claude calls.
 - **`--dry-run`:** it makes no POST and pushes nothing. The clone under `work/` is removed afterwards.
 - **`--only`:** `--only v002` handles only V002 (lowercase works, one Claude call, and `fix.md` shows `only: V002`). Repeating it handles each finding named. An unknown ID exits 2 with no clone and no GitHub call.
-- **Merging:** `--only V001`, then `--only V002`: `fix.json` has both, each with its own `fixed_at`. A full re-run keeps V001's `pr opened` and link, not `skipped`. After changing V001's title in `validation.json` (a re-validation), the next run drops the old V001.
-- **A failed PR call:** make the fake POST raise `FixError` once. That finding is `failed`, its branch is gone from the bare repo, and the next run opens the PR instead of skipping it.
+- **Merging:** after a full run, `--only V002` keeps V001's row in `fix.json`, each with its own `fixed_at`.
+- **A failed PR call:** make the fake POST raise `FixError` for a new branch. That finding is `failed` and its branch is gone from the bare repo. Make the fake PATCH fail for an existing branch. That finding is `failed` too, but its branch stays, because deleting it would close its PR.
+- **Issues:** extend the fake GitHub with `GET /user`, `GET …/issues?state=open&creator=…` (include an item with `pull_request` set, which must be ignored), `POST …/issues` and `PATCH …/issues/<n>`, and have the fake Claude return `still_present`. Check:
+  - A finding that isn't fixed and is still present gets `issue opened`. The issue is titled `[vulnscan] …`, holds the review notes, the steps and the `vulnscan-finding` marker, and leaves out the `poc`.
+  - A second run, and a run after renumbering the ids, give `issue updated` on the same issue.
+  - `still_present: false`, `--dry-run` and an open PR from an earlier run give `not fixed` and no issue.
+  - A POST that fails with HTTP 410 gives `not fixed` with a note. One that fails with 500 gives `failed` and exit 2.
+  - The dashboard links the issue and counts it.
 - **Stage-1 context:** put a `report.json` in the run folder with the finding V001 `validates`. Claude's prompt has a "Stage-1 findings it validates" block with that finding's rule, location and triage reason, and the "Never write a secret's value…" rule.
 
 ## 13. Fix stage dry run with real Claude (uses a little Claude quota, pushes nothing)
@@ -371,3 +379,26 @@ Check that:
 - LLM findings name what text the attacker controls and what it changes (a score, feedback, an action), and say when the output is rendered in another codebase. The app's own prompts and what the model might say aren't reported;
 - the access-control pass sticks to its classes. Other kinds of issue appear only when high or critical and not in the scanner findings for those files. On railsgoat, expect about a dozen issues, not two dozen;
 - nothing in the output quotes a secret's value.
+
+## 19. Purge over fabricated run folders (no quota, nothing on GitHub)
+
+Point `VULNSCAN_HOME` at a temporary folder and create three run folders for one repo: the oldest with `report.json`, `raw/semgrep.json`, the validation files, `strix-findings.json`, `raw/strix/pass-1/`, `fix.json` and `fix/`; the next with `report.json` and `validation.json`; the newest with `report.json` only.
+
+What to verify:
+- **Preview:** `vulnscan purge fix <repo>` lists the oldest run's `fix.json` and `fix/` (the newest run with fix results) and deletes nothing.
+- **Cascade:** `purge fix --yes` keeps the validation files. `purge validate --run <oldest> --yes` deletes the validation files, Strix's files and `raw/strix/`, and any fix files, but keeps `report.json` and `raw/semgrep.json`. `purge validate --yes` with no `--run` picks the middle run.
+- **Scan:** `purge scan --yes` deletes only the newest run folder. `--all --yes` deletes the rest, and then the repo's folder.
+- **Guards:** `--run /tmp`, `--run ../<other repo>/<run>` and `--run nope` exit 2 and touch nothing. `--run` with `--all` is refused.
+
+## 20. Progress logging with stand-ins (no quota)
+
+- **Claude:** a fake `claude` on `PATH` that reads stdin and prints recorded `stream-json` events: init, `tool_use` for Read (an absolute path inside the repo), Grep (a pattern that looks like a key), Glob and StructuredOutput, a `tool_result` holding file text, then a `result` event with `structured_output` and `total_cost_usd`. Check:
+  - `_run_claude` returns the structured output and cost;
+  - the log has `claude batch 1: Read app.py`, `Grep in .` without the pattern, and `writing its answer`, with no file text;
+  - `claude-1.json` holds only the result event;
+  - a 300 KB prompt doesn't deadlock;
+  - an exit 1 gives `exit 1: <stderr>`;
+  - a fake that sleeps past `TRIAGE_TIMEOUT` is killed with "timed out".
+- **Strix:** a fake `strix` that appends lines in Strix's log format to `strix_runs/<run>/strix.log` (`agent.register`, `agent.status`, `Vulnerability report created`, an `ERROR` line), sleeping a few seconds in the middle. The agents, the report and the error appear in the log while it runs. `running` statuses and a half-written last line don't. A fake that sleeps past `VALIDATE_TIMEOUT` is stopped.
+- **Scanners:** a `Tool` whose command sleeps a few seconds logs `still running` with `HEARTBEAT` set to 1, and a timeout shorter than the sleep still raises `TimeoutExpired`.
+- **Real scanner:** `Brakeman().run(...)` on a three-file Rails app with `User.where("name = '#{params[:name]}'")` still reports the SQL injection.

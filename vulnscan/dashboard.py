@@ -196,8 +196,9 @@ def _fix_cell(vid, d):
     if not r:
         return '<span class="muted">not attempted</span>'
     status = r.get("status") or "?"
-    if str(r.get("pr_url") or "").startswith("https://"):
-        out = f"{_e(status)}: {_link(r['pr_url'], '#' + str(r['pr_url']).rstrip('/').rsplit('/', 1)[-1])}"
+    url = str(r.get("pr_url") or r.get("issue_url") or "")
+    if url.startswith("https://"):
+        out = f"{_e(status)}: {_link(url, '#' + url.rstrip('/').rsplit('/', 1)[-1])}"
     else:
         out = _e(status)
         detail = r.get("detail") or r.get("error")
@@ -275,14 +276,15 @@ def _run_page(label, run, run_dir):
         meta.append(f"Last fix run {_e(fix.get('fixed_at'))}" + (" (dry run)" if fix.get("dry_run") else ""))
     parts.append(f'<p class="muted">{" · ".join(meta)}</p>')
 
-    prs = sum(1 for r in d["fixes"].values() if r.get("status") == "pr opened")
+    prs = sum(1 for r in d["fixes"].values() if r.get("status") in ("pr opened", "pr updated"))
+    issues = sum(1 for r in d["fixes"].values() if r.get("status") in ("issue opened", "issue updated"))
     sent = (validation or {}).get("items_sent")
     parts.append(
         f'<p class="funnel">Discovered <b>{d["discovered"]}</b> → open after triage <b>{len(d["open"])}</b>'
         + (" → validation not run" if validation is None else
            f" → sent to Strix <b>{sent or 0}</b> → validated <b>{len(d['v'])}</b>"
            f" (confirming {sum(1 for r in d['open'] if r['validated_by'])} open findings)"
-           + (" → fix not run" if fix is None else f" → PRs opened <b>{prs}</b>"))
+           + (" → fix not run" if fix is None else f" → PRs opened <b>{prs}</b>, issues <b>{issues}</b>"))
         + "</p>")
 
     if validation is not None:

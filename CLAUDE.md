@@ -5,9 +5,11 @@ vulnscan is a Python CLI that scans one GitHub repo for security issues:
 - It merges their output into one finding format.
 - It uses Claude Code (headless, read-only), pinned to Claude Opus 5.5 (`config.CLAUDE_MODEL`), to verify the findings and look for issues scanners miss. Its deep review (on by default, costly in quota, off with `--no-deep-review`) also has Claude check every outbound HTTP call for SSRF, every LLM call for prompt injection and misuse, and every request handler for access control, in batches vulnscan decides. `--claude-budget` caps a scan's Claude usage.
 - `vulnscan validate` (stage 2) re-checks a scan's open critical and high findings, 20 per Strix run, with Strix, whose agents run in Strix's own Docker sandbox and report only findings with a working PoC; its LLM is GLM 5.3 via OpenRouter.
-- `vulnscan fix` (stage 3) has Claude Code fix each Strix-validated finding in a throwaway clone, then opens one draft PR per finding.
+- `vulnscan fix` (stage 3) has Claude Code fix each Strix-validated finding in a throwaway clone, then opens one draft PR per finding, or a GitHub issue for one it can't fix safely.
 - It writes `report.md`, `report.json` and `report.csv` (plus `validation.*` after stage 2 and `fix.*` after stage 3).
 - `vulnscan dashboard` serves a read-only web page that tracks each run's findings through the three stages. On the instance it runs in its own container, reached through Session Manager port forwarding.
+- `vulnscan purge scan|validate|fix` deletes a stage's results, and the later stages', from a repo's run folders. It never touches GitHub.
+- Re-runs of `validate` and `fix` start from scratch: validate replaces the scan's earlier results, and fix updates the PRs an earlier run opened (branches are named after stage-1 ids).
 
 It runs as a proof of concept on one EC2 Spot instance in a staging AWS account, with each scan in a throwaway Docker container.
 
@@ -49,6 +51,7 @@ python3 -m venv .venv && .venv/bin/pip install -e .   # local setup (Python 3.9+
 LLM_API_KEY=sk-or-… .venv/bin/vulnscan validate OWASP/railsgoat   # stage 2 (needs Docker + strix CLI)
 .venv/bin/vulnscan fix OWASP/railsgoat --dry-run       # stage 3; public repos only with --dry-run (no push, no PR)
 .venv/bin/vulnscan dashboard                           # read-only tracking page on http://localhost:8080
+.venv/bin/vulnscan purge fix OWASP/railsgoat           # lists the newest run's fix results; --yes deletes them
 docker build -t vulnscan:test .                        # the production image
 cd deploy/terraform && terraform fmt && terraform validate
 AWS_PROFILE=<profile> terraform plan                   # read-only; profile is in ENVIRONMENT.local.md
@@ -60,7 +63,7 @@ AWS_PROFILE=<profile> terraform plan                   # read-only; profile is i
 - **The scanned repo can't switch off its own findings.** Scanners ignore its suppression comments and config (`nosemgrep`, `# nosec` and `.bandit`, `gitleaks:allow` and `.gitleaks.toml`, `config/brakeman.yml`), and report what its ignore files hide (`config/brakeman.ignore`, `checkov:skip`). Where no flag exists (`.gitleaksignore`, `.checkov.yaml`), the file itself becomes a finding. Claude treats a suppression as the repo's claim, not proof.
 - **Never copy a secret's value into Claude's output.** Every prompt says so: report.md, report.csv, the dashboard and PRs quote what Claude writes.
 - **Claude runs restricted.** It runs as `claude -p --restricted --strict-mcp-config --tools Read,Grep,Glob`, with the run folder (not the repo) as its working directory, so the repo's `.claude/` settings and hooks never load. Every `GITHUB_TOKEN*` and `GH_TOKEN*` variable is removed from its environment. **Exception:** `vulnscan fix` adds `Edit,Write` and `--permission-mode acceptEdits`, on a throwaway clone, and still gives Claude no shell, web or MCP and no token. `--restricted` still refuses writes to `.git` and settings files. vulnscan, not Claude, commits, pushes and opens the PR.
-- **`vulnscan fix` opens draft PRs only, never on public repos** (a branch would disclose the vulnerability before the fix is merged), and never runs git hooks (`core.hooksPath=/dev/null`). The PR body has Claude's reproduction steps, with placeholders for hosts, credentials and secret values. Strix's raw PoC stays out, because it can carry operator-supplied credentials or live URLs.
+- **`vulnscan fix` opens draft PRs, and issues for what it can't fix, never on public repos** (a branch or issue would disclose the vulnerability before the fix is merged), and never runs git hooks (`core.hooksPath=/dev/null`). PR and issue bodies have Claude's reproduction steps, with placeholders for hosts, credentials and secret values. Strix's raw PoC stays out, because it can carry operator-supplied credentials or live URLs.
 - **The scanned repo's code and dependencies are never run or installed** in the vulnscan process or its container. No `bundle install` or `npm install`. The one deliberate exception: stage-2 validation, where Strix runs the code inside **Strix's own Docker sandbox** — never in the vulnscan container — against a throwaway clone or copy (Strix mounts targets writable).
 - **The GitHub token never reaches Strix.** `vulnscan validate` clones the repo itself (org allowlist, `GIT_CONFIG_*`) and passes a local directory; Strix's environment holds only `STRIX_LLM`, `LLM_API_KEY` and what it needs to reach Docker.
 - **GitHub tokens reach git only through `GIT_CONFIG_*` environment variables,** never in a URL, on a command line or in `.git/config`. The one other use is `fix.py`'s in-process GitHub API calls (`Authorization` header).

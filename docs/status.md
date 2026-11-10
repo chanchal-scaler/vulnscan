@@ -1,6 +1,6 @@
 # Status and backlog
 
-Last updated 2026-11-05. Update this file whenever the deployment or the code's capabilities change. IDs for the live deployment are in `deploy/terraform/ENVIRONMENT.local.md`, and scan results stay on the instance. Neither goes in this repo.
+Last updated 2026-11-11. Update this file whenever the deployment or the code's capabilities change. IDs for the live deployment are in `deploy/terraform/ENVIRONMENT.local.md`, and scan results stay on the instance. Neither goes in this repo.
 
 ## Deployed
 
@@ -65,6 +65,28 @@ Last updated 2026-11-05. Update this file whenever the deployment or the code's 
   - Each pass's artifacts are in `raw/strix/pass-<n>/`, and `validation.md` lists the passes and the total cost. The dashboard renders the merged file.
   - The fix-branch guard refuses with no `validation.json` and is skipped with one. A missing key and an unknown `--only` id still exit 2 before cloning.
   - Not yet run with real Strix.
+- **LLM proof criteria in Strix's instructions (local, 2026-11-10), stand-in only:** the `deep review: LLM` label reaches `strix-findings.json` and the findings list, the LLM section names Strix's two LLM skills, the no-live-target note appears only without `--url`, and other findings' lines are unchanged. Not yet run with real Strix.
+- **Re-runs from scratch, fix branches by stage-1 id, and `vulnscan purge` (local, 2026-11-11), stand-ins only:** 48 checks, using a fake strix, a patched Claude and in-memory GitHub, and a local bare repo. The checks for each part:
+  - **Validate:** a re-run sends every critical/high finding again, replaces the results with `V001…`, and removes the fix files and old Strix artifacts. A failed pass doesn't stop the next one. `--only` adds and keeps `fix.json`.
+  - **Fix:** a re-run calls Claude for every finding, force-pushes to the same branches and updates their PRs, with no duplicates. That holds after a re-validation renumbers the ids too. A `[new]` finding keeps its branch. A failed PR update leaves an existing branch alone.
+  - **Purge:** it previews without `--yes`, removes the later stages with each stage, defaults to the newest run with results, and refuses `--run` outside the repo's folder.
+
+  Not yet run against GitHub or with real Strix.
+- **Issues for findings Claude can't fix (local, 2026-11-11), stand-ins only:** 8 more checks in the same harness.
+  - An issue is opened with the reason, the steps and the marker, and without the PoC.
+  - A re-run updates it rather than duplicating it, including after a re-validation.
+  - No issue is opened when the code no longer has the problem, on a dry run, or while an earlier PR is still open.
+  - HTTP 410 is only noted; other API errors fail the finding.
+  - The dashboard links the issues and counts them.
+
+  Not yet run against GitHub.
+- **Progress logging (local, 2026-11-11):** 22 checks with stand-ins:
+  - Claude's tool calls are logged as they happen, without Grep patterns or file contents. `claude-<n>.json` keeps only the result event. Timeouts and errors behave as before.
+  - Strix's agents, reports and errors are relayed from `strix.log` while it runs, and a timeout stops it with SIGTERM.
+  - Scanners log "still running".
+
+  The `stream-json` format was checked with one real Claude Code 2.1.267 call (Haiku), and real brakeman still runs through the new scanner code. Not yet seen on the instance (Claude Code 2.1.311).
+- **Strix 1.7.0 still the latest (2026-11-10):** on PyPI and GitHub, with sandbox 1.3.0 as its default. `vulnscan validate` now runs Strix's `deep` mode by default.
 
 - **Prompt and logic review, and the prompt-injection check (local, 2026-11-05):** not yet on the instance.
   - **Triage, with a stand-in Claude:**
@@ -140,6 +162,14 @@ Last updated 2026-11-05. Update this file whenever the deployment or the code's 
 | Scanner env-var stripping isn't a hard boundary | A compromised scanner, running as the same user, could read the parent process's environment, which holds the tokens | The container limits what it can reach to those two tokens and the internet. Separating users would close it. |
 | Only the default branch's latest commit is scanned | Secrets removed in later commits, and other branches, are missed | Backlog: history scan |
 | No scheduling or alerting | New CVEs in existing lockfiles go unnoticed until someone scans | Backlog: nightly scans and alerts |
+| A `deep`-mode Strix pass may run past the 2-hour `VULNSCAN_VALIDATE_TIMEOUT` | That pass counts as failed, and its findings show as not sent | Raise it for the run (`VULNSCAN_VALIDATE_TIMEOUT=21600`), or use `--scan-mode standard`. Set a better default once real deep passes have been timed |
+| `vulnscan fix` force-pushes to `vulnscan/fix-*` branches on every run | Commits people added to such a branch are lost on the next run | Deliberate (the owner chose updating PRs). Move a fix someone is changing to a branch of their own |
+| PRs opened before 2026-11-11 have branches named after `V…` ids | A re-run doesn't match them, so it opens new PRs next to them | Close the old ones by hand |
+| A `[new]` finding's branch is matched by its title and location | After a re-validation, Strix usually words it differently, so it gets a new PR and the old one stays open | Close the stale one. Findings with stage-1 ids don't have this problem |
+| vulnscan doesn't close the issues it opens | When a later run fixes the finding, its issue stays open next to the new PR | Close the issue when the PR is merged |
+| Finding earlier issues calls `GET /user` | A GitHub App token can't call it, so with one every finding that needs an issue would fail | Production uses a classic PAT; switching to a GitHub App means changing this lookup |
+| `purge` takes no lock | Purging a run while a stage writes to it leaves that stage's files half there | Don't purge a run while a scan, validate or fix is running on it |
+| The Strix progress feed reads `strix.log`, whose format isn't documented | A Strix release could change it; the feed would then go quiet, but validation results wouldn't change | Update `_StrixWatch` in `validate.py` |
 
 ## Backlog (suggested order)
 

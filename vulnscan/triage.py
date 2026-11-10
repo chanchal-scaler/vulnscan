@@ -14,8 +14,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from .config import CLAUDE_MODEL, TRIAGE_BATCH, TRIAGE_TIMEOUT, log
 from .findings import SEVERITIES
@@ -361,7 +363,9 @@ def triage(findings, repo, stacks, run_dir, model=None, max_items=400, budget=No
         if budget.exhausted():
             errors.append(f"batch {n}: {over}")
             continue
-        log(f"claude: batch {n}/{len(batches)}: {len(batch)} items (this can take a while)")
+        ids = [item["id"] for item, _ in batch]
+        log(f"claude: batch {n}/{len(batches)}: {len(batch)} items ({', '.join(ids[:10])}"
+            f"{f' and {len(ids) - 10} more' if len(ids) > 10 else ''}; this can take a while)")
         started = time.time()
         prompt = PROMPT.format(
             batch=f"\nThis is batch {n} of {len(batches)}; other batches cover the rest.\n" if len(batches) > 1 else "",
@@ -421,8 +425,32 @@ def triage(findings, repo, stacks, run_dir, model=None, max_items=400, budget=No
     return {"summary": summary, "additional_findings": (review or {}).get("additional_findings", [])}, meta
 
 
+def _describe(call, repo):
+    """One of Claude's tool calls, for the log. Grep patterns are left out: one could quote a secret's value."""
+    name, args = call.get("name") or "?", call.get("input") or {}
+    if name == "StructuredOutput":
+        return "writing its answer"
+    where = str(args.get("file_path") or args.get("path") or "")
+    if where.startswith(str(repo)):
+        where = os.path.relpath(where, repo)
+    if name == "Glob":
+        return f"Glob {args.get('pattern') or ''}" + (f" in {where}" if where else "")
+    if name == "Grep":
+        return f"Grep in {where or args.get('glob') or '.'}"
+    return f"{name} {where}".strip()
+
+
+def _feed(pipe, text):
+    try:
+        pipe.write(text)
+        pipe.close()
+    except OSError:  # Claude exited early; its exit code says why
+        pass
+
+
 def _run_claude(prompt, repo, run_dir, model, output_name, schema=SCHEMA, tools="Read,Grep,Glob"):
-    """Run one headless Claude call (read-only unless tools grants Edit/Write). Returns (structured_output, cost_usd)."""
+    """Run one headless Claude call (read-only unless tools grants Edit/Write), logging each file it reads, searches
+    or changes as it goes. Returns (structured_output, cost_usd)."""
     claude = shutil.which("claude")
     if not claude:
         raise TriageError("claude CLI not found on PATH")
@@ -431,7 +459,7 @@ def _run_claude(prompt, repo, run_dir, model, output_name, schema=SCHEMA, tools=
         claude, "-p", "--restricted", "--strict-mcp-config",
         "--tools", tools,
         "--add-dir", str(repo),
-        "--output-format", "json",
+        "--output-format", "stream-json", "--verbose",  # one JSON event per line as it works, the result last
         "--json-schema", json.dumps(schema),
     ]
     if "Edit" in tools.split(","):
@@ -440,20 +468,44 @@ def _run_claude(prompt, repo, run_dir, model, output_name, schema=SCHEMA, tools=
         cmd += ["--permission-mode", "acceptEdits"]
     cmd += ["--model", model or CLAUDE_MODEL]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_TOKEN", "GH_TOKEN"))}
+    name = output_name[len("claude-"):-len(".json")]
+    label = f"batch {name}" if name.isdigit() else name
 
-    try:
-        proc = subprocess.run(
-            cmd, input=prompt, cwd=run_dir, env=env,
-            capture_output=True, text=True, timeout=TRIAGE_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
+    out, tail, timed_out = None, deque(maxlen=5), threading.Event()
+    with tempfile.TemporaryFile("w+") as err:
+        proc = subprocess.Popen(cmd, cwd=run_dir, env=env, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
+        timer = threading.Timer(TRIAGE_TIMEOUT, lambda: (timed_out.set(), proc.kill()))
+        timer.start()
+        threading.Thread(target=_feed, args=(proc.stdin, prompt), daemon=True).start()
+        try:
+            for line in proc.stdout:
+                tail.append(line)
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "result":
+                    out = event
+                elif event.get("type") == "assistant":
+                    for block in (event.get("message") or {}).get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            log(f"claude {label}: {_describe(block, repo)}")
+            proc.wait()
+        finally:
+            timer.cancel()
+            if proc.poll() is None:  # interrupted
+                proc.kill()
+                proc.wait()
+        err.seek(0)
+        stderr = err.read()
+    # The result event alone: the same JSON as --output-format json gave. Tool results (file contents) aren't kept.
+    (run_dir / output_name).write_text(json.dumps(out) if out else "".join(tail))
+
+    if timed_out.is_set():
         raise TriageError(f"timed out after {TRIAGE_TIMEOUT}s")
-    (run_dir / output_name).write_text(proc.stdout)
-
-    try:
-        out = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        raise TriageError(f"exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-500:]}")
+    if out is None:
+        raise TriageError(f"exit {proc.returncode}: {(stderr or ''.join(tail)).strip()[-500:]}")
     if out.get("is_error") or not out.get("structured_output"):
         raise TriageError(str(out.get("result") or out.get("subtype") or "no structured output")[:500])
     return out["structured_output"], out.get("total_cost_usd")

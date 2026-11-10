@@ -23,6 +23,17 @@ def parse_github(spec):
     return (m.group("owner"), m.group("name")) if m else None
 
 
+def label_for(spec):
+    """The label checkout() gives spec, which names its run folders, without cloning anything."""
+    local = Path(spec).expanduser()
+    if local.is_dir():
+        return local.resolve().name
+    parsed = parse_github(spec)
+    if not parsed:
+        raise RepoError(f"'{spec}' is neither a local directory nor a GitHub repo (org/repo or URL)")
+    return "/".join(parsed)
+
+
 def github_token(owner):
     # A fine-grained token only reaches one owner's repos, so a per-org token
     # (GITHUB_TOKEN_SCALER_HQ for scaler-hq) wins over the generic one.

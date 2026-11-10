@@ -6,6 +6,7 @@ from .config import CLAUDE_MODEL, VALIDATE_PASS, log
 from .dashboard import serve
 from .fix import FixError, fix
 from .installer import InstallError, ensure, find
+from .purge import PurgeError, purge
 from .repo import RepoError
 from .scan import scan
 from .tools import ALL_TOOLS
@@ -65,6 +66,19 @@ def _cmd_fix(args):
     summary = ", ".join(f"{n} {s}" for s, n in counts.items()) or "nothing to fix"
     print(f"\nFixes: {summary}")
     print(f"Report: {report}")
+    return 0
+
+
+def _cmd_purge(args):
+    try:
+        paths = purge(args.repo, args.stage, run=args.run, all_runs=args.all_runs, yes=args.yes)
+    except (RepoError, PurgeError) as e:
+        log(str(e))
+        return 2
+    if not paths:
+        print(f"Nothing to purge: no {args.stage} results" + (f" in {args.run}" if args.run else ""))
+        return 0
+    print(("Deleted:" if args.yes else "Would delete (add --yes to delete):"), *paths, sep="\n  ")
     return 0
 
 
@@ -136,8 +150,8 @@ def main(argv=None):
     v.add_argument("--only", action="append", metavar="ID",
                    help="validate only this open stage-1 finding, of any severity, e.g. F003 or C01 (repeatable). "
                         "Adds to the results already in validation.json")
-    v.add_argument("--scan-mode", choices=["quick", "standard", "deep"], default="standard",
-                   help="Strix scan depth (default: standard)")
+    v.add_argument("--scan-mode", choices=["quick", "standard", "deep"], default="deep",
+                   help="Strix scan depth (default: deep, where a pass can take hours)")
     v.add_argument("--budget", type=float,
                    help=f"max LLM spend in USD for each pass of {VALIDATE_PASS} findings "
                         "(default: VULNSCAN_VALIDATE_BUDGET, 25; 0 = no cap)")
@@ -156,6 +170,18 @@ def main(argv=None):
     x.add_argument("--dry-run", action="store_true",
                    help="commit the fixes in a throwaway clone and save them as patches; push nothing, open no PRs")
     x.set_defaults(func=_cmd_fix)
+
+    p = sub.add_parser("purge", help="delete a stage's results (and the later stages'), from the repo's newest run "
+                                     "that has them by default; only lists them without --yes")
+    p.add_argument("stage", choices=["scan", "validate", "fix"],
+                   help="scan: the whole run folder; validate: the validation results and the fix results made from "
+                        "them; fix: the fix results. Fix PRs and branches on GitHub are never touched")
+    p.add_argument("repo", help="the repo: org/repo, a GitHub URL, or the local path that was scanned")
+    which = p.add_mutually_exclusive_group()
+    which.add_argument("--run", help="this run folder (its name or path) instead of the newest")
+    which.add_argument("--all", dest="all_runs", action="store_true", help="every run of the repo")
+    p.add_argument("--yes", action="store_true", help="delete them (without it, only list what would be deleted)")
+    p.set_defaults(func=_cmd_purge)
 
     d = sub.add_parser("dashboard", help="serve a read-only web page tracking every run through scan, validate and fix")
     d.add_argument("--host", default="127.0.0.1",

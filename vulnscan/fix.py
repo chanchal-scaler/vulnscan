@@ -4,14 +4,21 @@ For each Strix-validated finding (V001… in validation.json), Claude Code edits
 clone of the repo on its own branch. It runs restricted like triage, with Edit and Write
 added: still no shell, web or MCP, and no GitHub token. vulnscan itself commits, pushes
 the branch and opens a draft pull request with the GitHub token. One finding gets one
-branch and one PR; a finding Claude can't fix gets none.
+branch and one PR. A finding Claude can't fix safely, and that is still in the code, gets
+a GitHub issue instead, for a person to fix.
+
+Every run starts from scratch: no finding is skipped. A branch is named after the stage-1
+findings it fixes, so it stays the same when the scan is validated again. If an earlier run
+pushed it, this run's fix is force-pushed to it and the open PR's title and body are updated.
 
 Claude can't run the repo's code or tests, so every PR is a draft marked untested.
 Public repos are refused unless --dry-run, because a branch or PR would disclose the
 vulnerability before the fix is merged.
 """
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import urllib.error
@@ -19,6 +26,7 @@ import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 
 from .config import CLAUDE_MODEL, SCANS_DIR, log
 from .report import _cell
@@ -38,6 +46,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "fixed": {"type": "boolean"},
+        "still_present": {"type": "boolean"},
         "breaking": {"type": "boolean"},
         "before_merging": {"type": "array", "items": {"type": "string"}},
         "title": {"type": "string"},
@@ -45,7 +54,8 @@ SCHEMA = {
         "reproduce": {"type": "string"},
         "review_notes": {"type": "string"},
     },
-    "required": ["fixed", "breaking", "before_merging", "title", "summary", "reproduce", "review_notes"],
+    "required": ["fixed", "still_present", "breaking", "before_merging", "title", "summary", "reproduce",
+                 "review_notes"],
     "additionalProperties": False,
 }
 
@@ -63,7 +73,8 @@ caller, environment and deployment working matter equally.
 
 1. Read the code at the location, its callers and its tests (Read/Grep/Glob), and confirm the issue. The stage-1
    findings, when given, are the scanners' and the triage's view of it, and often point at the vulnerable line.
-   If the issue is no longer present in this code, change nothing, set fixed to false and say so in review_notes.
+   If the issue is no longer present in this code, change nothing, set fixed and still_present to false and say so
+   in review_notes.
 2. Before changing anything that depends on configuration, find out how the app is configured and deployed: settings
    and env files, Dockerfiles, compose files, CI/CD workflows, deployment config (.ebextensions, Kubernetes, Helm,
    Terraform). Follow the existing pattern, e.g. if secrets come from environment variables, use one; don't rely on
@@ -84,23 +95,27 @@ caller, environment and deployment working matter equally.
    before_merging. A code change is only worth making if every environment keeps working, e.g. reading the value
    from the environment while keeping the current source as the fallback. Removing a value or default that a
    deployment may rely on is breaking.
-5. If you can't fix it safely, change nothing and set fixed to false.
+5. If you can't fix it safely, change nothing and set fixed to false. The finding then becomes an issue for a person
+   to fix, so say in review_notes why you couldn't, and what they must decide or do to fix it safely.
 
 Return:
 - fixed: true only if you changed files and they fix the issue. For a committed or hardcoded secret, the change in
   step 4 counts, with rotation in before_merging
+- still_present: false only if the issue is no longer in this code
 - breaking: true if merging the change could break any caller, user, environment or deployment that works today
 - before_merging: each step someone must complete before merging is safe, as a short concrete instruction, e.g.
   "Set PAYMENT_API_KEY in every environment", "Rotate the leaked key", "Confirm no client calls POST /internal/x";
   [] if none. Follow-ups that don't block merging belong in review_notes
 - title: a pull request title under 70 characters, e.g. "Fix SQL injection in UsersController#index"
-- summary: for the pull request: what was wrong and what you changed, in 2-5 sentences
+- summary: for the pull request: what was wrong and what you changed, in 2-5 sentences. If you didn't fix it, what
+  is wrong
 - reproduce: Markdown steps a reviewer can follow on a local or staging instance to reproduce the issue and confirm
   the fix, based on the finding's proof-of-concept and the code. If it is reachable over HTTP, give a curl command
   against $BASE_URL, using the full path the app serves (including router prefixes); otherwise give numbered steps.
   Use placeholders such as $TOKEN or <user-id> for credentials and IDs, and say how to get them. Never include a
   real hostname. End with what happens before the fix and what should happen after it
-- review_notes: what a reviewer should check or test, including anything you couldn't verify
+- review_notes: what a reviewer should check or test, including anything you couldn't verify. If you didn't fix it,
+  why not, and what a person must decide or do to fix it safely
 
 Finding (JSON):
 {finding}
@@ -151,6 +166,84 @@ def _location(f):
     return f"{f['file']}:{f['line']}" if f.get("line") else (f.get("file") or "")
 
 
+def _branch_keys(findings):
+    """{V id: the end of its branch name}. It's the stage-1 ids the finding validates, which stay the same when
+    the scan is validated again, so a later run finds the same branch and PR. A finding Strix found on its own
+    gets a hash of its title and location instead. Findings that would share one get their V id added."""
+    keys = {f["id"]: "-".join(sorted(f.get("validates") or []))
+            or "new-" + hashlib.sha256(f"{f.get('title')}|{_location(f)}".encode()).hexdigest()[:8]
+            for f in findings}
+    shared = Counter(keys.values())
+    return {vid: key if shared[key] == 1 else f"{key}-{vid}" for vid, key in keys.items()}
+
+
+def _open_pr(ctx, branch):
+    """The open pull request from this branch, if an earlier run opened one."""
+    query = urlencode({"head": f"{ctx['owner']}:{branch}", "state": "open"})
+    prs = _github("GET", f"/repos/{ctx['owner']}/{ctx['name']}/pulls?{query}", ctx["token"])
+    return prs[0] if prs else None
+
+
+_MARKER = re.compile(r"<!-- vulnscan-finding: (\S+) -->")
+
+
+def _open_issues(ctx):
+    """{marker: issue} for the open issues earlier fix runs opened in this repo (the token's user's, with a
+    vulnscan-finding marker in the body). Listed once per run."""
+    if ctx["issues"] is None:
+        login = _github("GET", "/user", ctx["token"]).get("login")
+        ctx["issues"], page = {}, 1
+        while True:
+            query = urlencode({"state": "open", "creator": login, "per_page": 100, "page": page})
+            issues = _github("GET", f"/repos/{ctx['owner']}/{ctx['name']}/issues?{query}", ctx["token"])
+            for issue in issues:
+                marker = _MARKER.search(issue.get("body") or "")
+                if marker and "pull_request" not in issue:
+                    ctx["issues"][marker.group(1)] = issue
+            if len(issues) < 100:
+                return ctx["issues"]
+            page += 1
+    return ctx["issues"]
+
+
+def _issue_body(f, out, run_name, commit, marker):
+    lines = [
+        "Automated report from vulnscan: Strix validated this vulnerability with a working proof-of-concept, but"
+        " Claude Code couldn't write a fix that is safe to merge, so it needs a person.",
+        "",
+        f"**{f['id']} · {f['severity']} · {_cell(f['title'], 160)}**",
+        f"- Location: `{_cell(_location(f), 120) or 'n/a'}`",
+    ]
+    if f.get("validates"):
+        lines.append(f"- Stage-1 findings: {', '.join(f['validates'])}")
+    lines.append(f"- Scan run: `{run_name}`, commit `{(commit or '')[:12]}`")
+    if out.get("summary"):
+        lines += ["", "### What's wrong", out["summary"]]
+    if out.get("reproduce"):
+        lines += ["", "### Steps to reproduce",
+                  "Run these only against a local or staging instance you are allowed to test.", "", out["reproduce"]]
+    lines += ["", "### Why there's no automated fix", out.get("review_notes") or "Claude Code made no change.",
+              "", "> [!NOTE]",
+              "> Strix's original proof-of-concept is in `validation.md` in the run folder on the vulnscan instance.",
+              "", f"<!-- vulnscan-finding: {marker} -->"]
+    return "\n".join(lines)
+
+
+def _file_issue(f, out, ctx):
+    """Open an issue for a finding Claude couldn't fix, or update the one an earlier run opened for it.
+    Returns (status, issue)."""
+    marker = f"{ctx['run_name']}-{ctx['keys'][f['id']]}"
+    fields = {"title": f"[vulnscan] {' '.join(f['title'].split())}"[:200],
+              "body": _issue_body(f, out, ctx["run_name"], ctx["base_sha"], marker)}
+    issue = _open_issues(ctx).get(marker)
+    if issue:
+        return "issue updated", _github("PATCH", f"/repos/{ctx['owner']}/{ctx['name']}/issues/{issue['number']}",
+                                        ctx["token"], fields)
+    issue = ctx["issues"][marker] = _github("POST", f"/repos/{ctx['owner']}/{ctx['name']}/issues", ctx["token"],
+                                            fields)
+    return "issue opened", issue
+
+
 def _pr_body(f, out, run_name, commit):
     lines = []
     if out.get("breaking"):
@@ -186,12 +279,10 @@ def _pr_body(f, out, run_name, commit):
 
 
 def _fix_one(f, ctx):
-    """Fix one validated finding on its own branch. Returns the fields to record for it."""
+    """Fix one validated finding on its own branch, opening its PR or updating the one an earlier run opened.
+    Returns the fields to record for it."""
     repo, owner, name = ctx["repo"], ctx["owner"], ctx["name"]
-    branch = f"vulnscan/fix-{ctx['run_name']}-{f['id']}"
-    if _git(repo, "ls-remote", "--heads", "origin", branch, env=ctx["env"]).strip():
-        return {"status": "skipped", "branch": branch, "detail": "branch already exists (an earlier fix run?)"}
-
+    branch = f"vulnscan/fix-{ctx['run_name']}-{ctx['keys'][f['id']]}"
     _git(repo, "checkout", "-q", "-f", "-B", branch, ctx["base_sha"])
     _git(repo, "clean", "-q", "-fdx")  # drop anything left by the previous finding
     finding = {k: f.get(k) for k in ("id", "severity", "title", "file", "line", "rule", "description", "poc", "fix")}
@@ -200,11 +291,33 @@ def _fix_one(f, ctx):
     prompt = PROMPT.format(repo=repo, finding=json.dumps(finding, indent=1), related=(
         f"\nStage-1 findings it validates (JSON):\n{json.dumps(related, indent=1)}\n" if related else ""))
     log(f"fix: {f['id']} ({f['severity']}): {_cell(f['title'], 80)}")
+    log(f"fix: {f['id']}: on branch {branch}; Claude is writing the fix")
     out, cost = _run_claude(prompt, repo, ctx["out_dir"], ctx["model"], f"claude-{f['id']}.json",
                             schema=SCHEMA, tools="Read,Grep,Glob,Edit,Write")
     ctx["cost"] += cost or 0
-    if not out.get("fixed") or not _git(repo, "status", "--porcelain").strip():
-        return {"status": "not fixed", "detail": out.get("review_notes") or out.get("summary") or "no change made"}
+    changed = _git(repo, "status", "--porcelain").strip()
+    if not out.get("fixed") or not changed:
+        result = {"status": "not fixed", "detail": out.get("review_notes") or out.get("summary") or "no change made"}
+        if out.get("still_present") is False or ctx["dry_run"]:  # nothing to fix, or nothing goes to GitHub
+            return result
+        try:  # an earlier run's PR stays as it is, and its link stays in fix.json
+            pr = _open_pr(ctx, branch)
+        except FixError:
+            pr = None
+        if pr:  # it still tracks the finding, so no issue
+            result.update(branch=branch, pr_url=pr.get("html_url"))
+            result["detail"] += f" (the PR an earlier run opened is still open: {pr.get('html_url')})"
+            return result
+        log(f"fix: {f['id']}: Claude couldn't fix it safely; filing an issue")
+        try:
+            status, issue = _file_issue(f, out, ctx)
+        except FixError as e:
+            if "HTTP 410" not in str(e):
+                raise
+            result["detail"] += " (issues are turned off in this repo, so no issue was opened)"
+            return result
+        result.update(status=status, issue_url=issue.get("html_url"))
+        return result
 
     title = (out.get("title") or f"Fix {f['title']}").strip()
     _git(repo, "add", "-A")
@@ -213,36 +326,43 @@ def _fix_one(f, ctx):
          f"Validated by Strix with a working proof-of-concept (run {ctx['run_name']}).\n"
          "Written by Claude Code; untested.", env=dict(os.environ, **GIT_AUTHOR))
     (ctx["out_dir"] / f"{f['id']}.patch").write_text(_git(repo, "format-patch", "-1", "--stdout"))
+    log(f"fix: {f['id']}: committed {len(changed.splitlines())} changed file(s)")
     breaking = bool(out.get("breaking"))
     flag = "breaking: " if breaking else ""
     if ctx["dry_run"]:
         return {"status": "committed (dry run)", "branch": branch, "breaking": breaking,
                 "detail": f"{flag}fix/{f['id']}.patch"}
 
-    _git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}", env=ctx["env"])
+    existed = bool(_git(repo, "ls-remote", "--heads", "origin", branch, env=ctx["env"]).strip())
+    log(f"fix: {f['id']}: pushing {branch}" + (", replacing an earlier run's fix" if existed else ""))
+    # --force: an earlier run's branch gets this run's fix, replacing any commits added to it since.
+    _git(repo, "push", "-q", "--force", "origin", f"HEAD:refs/heads/{branch}", env=ctx["env"])
+    fields = {"title": f"[vulnscan]{'[breaking]' if breaking else ''} {title}"[:200], "base": ctx["base"],
+              "body": _pr_body(f, out, ctx["run_name"], ctx["base_sha"])}
     try:
-        pr = _github("POST", f"/repos/{owner}/{name}/pulls", ctx["token"], {
-            "title": f"[vulnscan]{'[breaking]' if breaking else ''} {title}"[:200], "head": branch,
-            "base": ctx["base"], "draft": True, "body": _pr_body(f, out, ctx["run_name"], ctx["base_sha"]),
-        })
+        pr = _open_pr(ctx, branch) if existed else None
+        if pr:
+            pr = _github("PATCH", f"/repos/{owner}/{name}/pulls/{pr['number']}", ctx["token"], fields)
+            status = "pr updated"
+        else:
+            pr = _github("POST", f"/repos/{owner}/{name}/pulls", ctx["token"], dict(fields, head=branch, draft=True))
+            status = "pr opened"
     except FixError as e:
-        # A re-run skips a finding whose branch exists, so a branch left without its PR would never get one.
-        try:
+        if existed:  # deleting it would close the PR an earlier run opened
+            raise FixError(f"{e}; the fix is pushed to {branch}, but its PR wasn't opened or updated")
+        try:  # don't leave a branch with no PR behind
             _git(repo, "push", "-q", "origin", "--delete", branch, env=ctx["env"])
         except FixError as d:
-            raise FixError(f"{e}; the branch {branch} is pushed and couldn't be deleted ({d}): delete it before"
-                           " re-running, or the re-run will skip this finding")
-        raise FixError(f"{e}; the pushed branch was deleted, so a re-run tries again")
-    return {"status": "pr opened", "branch": branch, "breaking": breaking, "pr_url": pr.get("html_url"),
+            raise FixError(f"{e}; the branch {branch} is pushed and couldn't be deleted ({d}): delete it by hand")
+        raise FixError(f"{e}; the pushed branch was deleted")
+    return {"status": status, "branch": branch, "breaking": breaking, "pr_url": pr.get("html_url"),
             "detail": f"{flag}{pr.get('html_url')}"}
 
 
 def _merge_earlier(run_dir, results, titles):
-    """This run's results plus earlier fix runs' on the same scan, one per finding.
+    """This run's results, plus earlier fix runs' for the findings this run didn't handle (an --only run).
 
-    An earlier result is kept for a finding this run didn't handle, and over this run's
-    "skipped" (its branch exists, so the earlier result, e.g. the PR link, still applies).
-    It's dropped if validation.json no longer has that id with that title (re-validated).
+    An earlier result is dropped if validation.json no longer has that id with that title.
     """
     try:
         earlier = json.loads((run_dir / "fix.json").read_text())
@@ -250,9 +370,7 @@ def _merge_earlier(run_dir, results, titles):
         return results
     merged = {r.get("id"): dict({"fixed_at": earlier.get("fixed_at")}, **r)
               for r in earlier.get("results") or [] if titles.get(r.get("id")) == r.get("title")}
-    for r in results:
-        if not (r["status"] == "skipped" and r["id"] in merged):
-            merged[r["id"]] = r
+    merged.update((r["id"], r) for r in results)
     return sorted(merged.values(), key=lambda r: r["id"])
 
 
@@ -281,7 +399,8 @@ def _write_reports(run_dir, meta, results):
 
 
 def fix(spec, run_dir=None, ref=None, model=None, dry_run=False, only=()):
-    """Open one draft PR per validated finding (or only those in `only`). Returns (fix_md_path, counts by status).
+    """Open one draft PR per validated finding (or only those in `only`), or an issue for one Claude couldn't fix.
+    Returns (fix_md_path, counts by status).
 
     Raises RepoError/FixError on bad input, or after writing fix.md if any finding failed.
     """
@@ -325,6 +444,8 @@ def fix(spec, run_dir=None, ref=None, model=None, dry_run=False, only=()):
             log(f"warning: fixing commit {base_sha or '?'}; validation ran on {validation['commit']}")
 
         out_dir = run_dir / "fix"
+        if not wanted:  # a full run starts from scratch
+            shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(exist_ok=True)
         try:  # the stage-1 findings each validated finding names, to give Claude the scanners' view too
             stage1 = {it["id"]: it for it in open_items(json.loads((run_dir / "report.json").read_text()), None,
@@ -333,7 +454,8 @@ def fix(spec, run_dir=None, ref=None, model=None, dry_run=False, only=()):
             stage1 = {}
         ctx = {"repo": repo, "owner": owner, "name": name, "token": token, "env": git_env(owner),
                "base": meta["base"], "base_sha": base_sha, "run_name": run_dir.name, "out_dir": out_dir,
-               "model": model, "dry_run": dry_run, "cost": 0.0, "stage1": stage1}
+               "model": model, "dry_run": dry_run, "cost": 0.0, "stage1": stage1,
+               "keys": _branch_keys(validation.get("findings") or []), "issues": None}
         results = []
         for f in findings:
             r = {"id": f["id"], "severity": f["severity"], "title": f["title"], "location": _location(f),
@@ -342,8 +464,8 @@ def fix(spec, run_dir=None, ref=None, model=None, dry_run=False, only=()):
                 r.update(_fix_one(f, ctx))
             except (FixError, TriageError) as e:
                 r.update(status="failed", error=str(e))
-            log(f"fix: {f['id']}: {r['status']}" + (f": {r.get('pr_url') or r.get('error') or ''}"
-                                                       if r["status"] in ("pr opened", "failed") else ""))
+            log(f"fix: {f['id']}: {r['status']}: "
+                + _cell(r.get('pr_url') or r.get('issue_url') or r.get('error') or r.get('detail') or '', 200))
             results.append(r)
         meta["cost_usd"] = ctx["cost"]
 

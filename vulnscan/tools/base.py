@@ -1,9 +1,13 @@
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Dict, List
 
+from ..config import log
 from ..findings import Finding
+
+HEARTBEAT = 60  # seconds between "still running" lines while a scanner works
 
 
 class ToolError(Exception):
@@ -32,15 +36,24 @@ class Tool:
         raise NotImplementedError
 
     def run(self, exe, repo, target, report, env, timeout) -> List[Finding]:
-        proc = subprocess.run(
-            self.args(exe, target, report), cwd=target, env=env,
-            capture_output=True, text=True, timeout=timeout,
-        )
+        cmd = self.args(exe, target, report)
+        proc = subprocess.Popen(cmd, cwd=target, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        started = time.time()
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=min(HEARTBEAT, max(1, timeout - (time.time() - started))))
+                break
+            except subprocess.TimeoutExpired:
+                if time.time() - started >= timeout:
+                    proc.kill()
+                    proc.communicate()
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                log(f"{self.name}: still running ({(time.time() - started) / 60:.0f} min)")
         if proc.returncode in self.nothing_to_scan_codes:
             return []
         if self.stdout_is_report:
-            report.write_text(proc.stdout)
-        detail = (proc.stderr or proc.stdout).strip()[-500:]
+            report.write_text(stdout)
+        detail = (stderr or stdout).strip()[-500:]
         if proc.returncode not in self.ok_exit_codes:
             raise ToolError(f"exit {proc.returncode}: {detail}")
         if not report.exists() or not report.read_text().strip():
