@@ -12,6 +12,16 @@ Last updated 2026-11-11. Update this file whenever the deployment or the code's 
 - **Stage 2 (validation):** the code, the image (Strix 1.7.0, sandbox 1.3.0) and the wrapper wiring are done, but nothing is on the instance yet: the owner pushes, `vulnscan-build` rebuilds, `terraform apply` adds the parameter, the key is set, and the first validation is run. None of that has happened.
 - **Stage 3 (`vulnscan fix`):** the code is done. It needs no image, wrapper, Terraform or token change, because it uses the existing GitHub PAT (`repo` scope, plus `workflow` since 2026-11-05) and Claude token. It reaches the instance with the next `vulnscan-build`, and it can only run after a validation has.
 - **Dashboard (`vulnscan dashboard`):** the code, the wrapper refusal and the `vulnscan-build` wiring are done. No Terraform, IAM or cost change. On 2026-11-05 the instance built `b3bc583`, so the image has the dashboard code and the new wrapper. The container didn't start, because the installed `vulnscan-build` was still the first-boot copy without the dashboard step. `vulnscan-build` now reinstalls itself; the instance needs the one-time manual install in [operations.md](operations.md#build-or-update-the-scanner). Port forwarding to it isn't checked yet.
+- **Changes of 2026-11-10/11 aren't on the instance yet.** They cover:
+  - LLM proof criteria in Strix's instructions;
+  - Strix's `standard` mode by default (it was `deep` from 2026-11-10 until 2026-11-11);
+  - validate and fix re-runs from scratch;
+  - fix branches named by stage-1 id, with PRs updated rather than duplicated;
+  - issues for findings Claude can't fix;
+  - `vulnscan purge`;
+  - progress logging.
+
+  These are code and docs only, tested locally with stand-ins. Most were committed as `21cfa87` on 2026-11-11, and later doc fixes followed. They reach the instance once pushed to `main` and `vulnscan-build` runs. No Terraform, IAM, wrapper, image or token change is needed: the classic PAT's `repo` scope already covers issues. Backlog item 3 lists what to check for real.
 
 ## Verified
 
@@ -72,8 +82,9 @@ Last updated 2026-11-11. Update this file whenever the deployment or the code's 
   - **Purge:** it previews without `--yes`, removes the later stages with each stage, defaults to the newest run with results, and refuses `--run` outside the repo's folder.
 
   Not yet run against GitHub or with real Strix.
-- **Issues for findings Claude can't fix (local, 2026-11-11), stand-ins only:** 8 more checks in the same harness.
-  - An issue is opened with the reason, the steps and the marker, and without the PoC.
+- **Issues for findings Claude can't fix (local, 2026-11-11), stand-ins only:** more checks in the same harness, 62 in all.
+  - An issue is opened with the reason, the steps and the marker, and without the PoC. `fix.md` shows its link.
+  - When two findings share stage-1 ids, the first keeps its branch and issue.
   - A re-run updates it rather than duplicating it, including after a re-validation.
   - No issue is opened when the code no longer has the problem, on a dry run, or while an earlier PR is still open.
   - HTTP 410 is only noted; other API errors fail the finding.
@@ -86,7 +97,7 @@ Last updated 2026-11-11. Update this file whenever the deployment or the code's 
   - Scanners log "still running".
 
   The `stream-json` format was checked with one real Claude Code 2.1.267 call (Haiku), and real brakeman still runs through the new scanner code. Not yet seen on the instance (Claude Code 2.1.311).
-- **Strix 1.7.0 still the latest (2026-11-10):** on PyPI and GitHub, with sandbox 1.3.0 as its default. `vulnscan validate` now runs Strix's `deep` mode by default.
+- **Strix 1.7.0 still the latest (2026-11-10):** on PyPI and GitHub, with sandbox 1.3.0 as its default. `vulnscan validate` ran Strix's `deep` mode by default from then until 2026-11-11, when the default went back to `standard`.
 
 - **Prompt and logic review, and the prompt-injection check (local, 2026-11-05):** not yet on the instance.
   - **Triage, with a stand-in Claude:**
@@ -148,7 +159,7 @@ Last updated 2026-11-11. Update this file whenever the deployment or the code's 
 | semgrep's full runtime on the biggest repo hasn't been measured | It may need more than 30 minutes | Use `VULNSCAN_TOOL_TIMEOUT=3600`; note the time after the next run |
 | The `instance_type` variable defaults to `t4g.large`, but the deployment uses `t3.large` (set in `terraform.tfvars`) | A fresh deployment without tfvars gets t4g, which had no Spot capacity | Consider changing the default |
 | Terraform state exists only on the operator's machine | If that machine is lost, the deployment can only be managed by hand | Back up, or move to an S3 backend with locking |
-| A single classic GitHub PAT has write access to every repo its user can reach | If leaked, it allows pushing to org repos, including their GitHub Actions workflows (`workflow` scope). `vulnscan fix` now relies on that write access (branches and PRs) | Fine-grained per-org tokens (already supported) with Contents, Pull requests and Workflows set to read and write, or a GitHub App |
+| A single classic GitHub PAT has write access to every repo its user can reach | If leaked, it allows pushing to org repos, including their GitHub Actions workflows (`workflow` scope). `vulnscan fix` now relies on that write access (branches, PRs and issues) | Fine-grained per-org tokens (already supported) with Contents, Pull requests, Issues and Workflows set to read and write, or a GitHub App (which would also need the issue lookup changed, see below) |
 | `vulnscan fix` lets Claude write to a clone of untrusted code | Repo content could steer Claude into writing a harmful change into a PR. A workflow Claude changes that has `push` or `pull_request` triggers runs from the fix branch, with the repo's secrets, before anyone reviews it | Draft PRs only, no shell or token for Claude, `--restricted` blocks `.git` and settings writes, and the PR needs human review before merging ([decisions.md](decisions.md)) |
 | `fix` PRs are authored by the PAT's user, and commits by `vulnscan <vulnscan@noreply.invalid>` | Commits are unverified and unlinked. A ruleset that restricts commit emails or requires signed commits will reject the push or block the merge | Use a GitHub App (signed bot commits), or set the identity to the PAT user's noreply address |
 | `fix` can't regenerate lockfiles | Dependency findings are usually "not fixed": Claude changes versions only when it can keep the manifest and lockfile consistent by hand | Bump dependencies with Dependabot or by hand |
@@ -162,9 +173,10 @@ Last updated 2026-11-11. Update this file whenever the deployment or the code's 
 | Scanner env-var stripping isn't a hard boundary | A compromised scanner, running as the same user, could read the parent process's environment, which holds the tokens | The container limits what it can reach to those two tokens and the internet. Separating users would close it. |
 | Only the default branch's latest commit is scanned | Secrets removed in later commits, and other branches, are missed | Backlog: history scan |
 | No scheduling or alerting | New CVEs in existing lockfiles go unnoticed until someone scans | Backlog: nightly scans and alerts |
-| A `deep`-mode Strix pass may run past the 2-hour `VULNSCAN_VALIDATE_TIMEOUT` | That pass counts as failed, and its findings show as not sent | Raise it for the run (`VULNSCAN_VALIDATE_TIMEOUT=21600`), or use `--scan-mode standard`. Set a better default once real deep passes have been timed |
+| A Strix pass run with `--scan-mode deep` may run past the 2-hour `VULNSCAN_VALIDATE_TIMEOUT` | That pass counts as failed, and its findings show as not sent | Raise it for the run (`VULNSCAN_VALIDATE_TIMEOUT=21600`). Set a better default once real passes have been timed |
 | `vulnscan fix` force-pushes to `vulnscan/fix-*` branches on every run | Commits people added to such a branch are lost on the next run | Deliberate (the owner chose updating PRs). Move a fix someone is changing to a branch of their own |
 | PRs opened before 2026-11-11 have branches named after `V…` ids | A re-run doesn't match them, so it opens new PRs next to them | Close the old ones by hand |
+| Fix branches, PRs and issues are matched by the stage-1 ids a finding validates | After a re-validation, a finding that validates a different set of ids gets a new PR or issue, and the old one stays open. When several validated findings share the same ids, the plain-key branch, PR and issue go to whichever is first in `V…` order. So after a re-validation, a different one of them can take them over: its fix is force-pushed there, and the title and body are rewritten for it. They're the same stage-1 finding, reached in different ways | Close a stale PR or issue. Check a PR's body still matches its branch after a re-validation |
 | A `[new]` finding's branch is matched by its title and location | After a re-validation, Strix usually words it differently, so it gets a new PR and the old one stays open | Close the stale one. Findings with stage-1 ids don't have this problem |
 | vulnscan doesn't close the issues it opens | When a later run fixes the finding, its issue stays open next to the new PR | Close the issue when the PR is merged |
 | Finding earlier issues calls `GET /user` | A GitHub App token can't call it, so with one every finding that needs an issue would fail | Production uses a classic PAT; switching to a GitHub App means changing this lookup |
@@ -178,14 +190,22 @@ Last updated 2026-11-11. Update this file whenever the deployment or the code's 
    - the owner pushes, then on the instance `vulnscan-build` (rebuilds the image with Strix, pre-pulls the sandbox, installs the wrapper);
    - `terraform apply` from the operator machine (adds `/vulnscan/openrouter-token` as a placeholder — no other change, no instance replacement), then set the OpenRouter key by hand ([deploy/README.md](../deploy/README.md#add-the-tokens));
    - run one small validation — e.g. one pass with `--only` and a few critical or high ids from a modest stage-1 scan, `--scan-mode quick --budget 5` — and review `validation.md` before letting it run every pass on anything bigger. The Strix sandbox image is multi-GB, so the first `vulnscan-build` is slower than usual.
-3. **Nightly scans with alerts:**
+3. **Check the 2026-11-10/11 changes for real,** after item 2, on a private test repo:
+   - run a full `vulnscan fix` twice. The second run updates the same PRs and issues (`pr updated`, `issue updated`) instead of opening new ones;
+   - re-validate that scan and run `fix` again. The PRs and issues are still found, by their stage-1 ids;
+   - in the instance's log, check that Claude's tool calls appear as they happen (not yet seen with Claude Code 2.1.311's `stream-json`), and that Strix's agents and reports appear during a pass;
+   - time a Strix pass in `standard` mode (the default) and one with `--scan-mode deep` on the same findings, compare their `validation.md`, and set `VULNSCAN_VALIDATE_TIMEOUT`'s default from them;
+   - close the PRs opened before 2026-11-11, whose branches are named after `V…` ids.
+4. **Nightly scans with alerts:**
    - a systemd timer on the instance runs `vulnscan scan` for a list of repos;
    - it compares each run with the previous `report.json`;
    - it posts new confirmed critical/high findings to Slack.
    This is what would have caught HttpToShell-style exposures. Needs a webhook and approval.
-4. **Run `--deep-review` on a real repo:** start with `--deep-path` on one area of a monolith and a `--claude-budget`. Note how much of the plan's allowance it used (the claude.ai usage page before and after), how long it took and what it found, before running it on a whole app.
-5. **Terraform state to S3,** with DynamoDB locking or S3 native locking.
-6. **An optional full-history secret scan** (`gitleaks git` on a full clone).
-7. **Move Claude to Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`). The container would then need AWS credentials: raise the hop limit to 2, or have the wrapper pass in short-lived credentials.
-8. **Fine-grained per-org tokens or a GitHub App** instead of the classic PAT.
-9. **An automated test suite,** turning [testing.md](testing.md) checks 3, 7, 10, 15 and 16 into scripts.
+5. **Run `--deep-review` on a real repo:** start with `--deep-path` on one area of a monolith and a `--claude-budget`. Note how much of the plan's allowance it used (the claude.ai usage page before and after), how long it took and what it found, before running it on a whole app.
+6. **Terraform state to S3,** with DynamoDB locking or S3 native locking.
+7. **An optional full-history secret scan** (`gitleaks git` on a full clone).
+8. **Move Claude to Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`). The container would then need AWS credentials: raise the hop limit to 2, or have the wrapper pass in short-lived credentials.
+9. **Fine-grained per-org tokens or a GitHub App** instead of the classic PAT.
+10. **An automated test suite,** turning [testing.md](testing.md) checks 3, 7, 10, 12, 15, 16, 19 and 20 into scripts. The stand-in scripts used on 2026-11-10/11 (re-runs, purge, issues, progress logging) weren't kept in the repo; those sections describe them.
+11. **Validate LLM findings against staging:** run `validate --only <C id> --url <staging>` with a test login ([operations.md](operations.md#logging-in-to-a-live-target)) for the deep review's LLM findings. Strix 1.7.0 ships `llm_prompt_injection` and `llm_applications` skills, which vulnscan now tells it to load, and it can install Promptfoo inside its sandbox. If it still falls short, add Promptfoo (MIT; OpenAI bought it in March 2026 and kept the licence), aimed at the endpoints the LLM pass names. garak probes the model rather than the app, and PyRIT needs code for each target.
+12. **Open question for the owner: Strix login credentials.** Today they go in `--instruction`, which puts them on the container's command line and in `strix-instructions.md` (they must reach the model either way). A dedicated option could read them from a file or Parameter Store instead.

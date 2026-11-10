@@ -107,7 +107,7 @@ Detection is only the first stage. `vulnscan validate` re-checks a finished scan
 - **Seeding:** the open findings from the scan's `report.json` become an instruction file and a workspace file, so Strix validates *your* detected issues (worst first) instead of re-scanning from scratch. A rule or package Claude judged as one group is sent once, as its first hit outside tests and vendored code, so a noisy rule can't crowd out the rest. Dependencies come after everything else, and `info` findings aren't sent. Strix is asked to start each title with the ids it validates, like `[F012, C03]`, or `[new]`, and to work through the list in order.
 - **LLM findings:** Claude's findings from the deep review's LLM pass are labelled for Strix, which is told to load its LLM skills and prove an effect through the app, such as a grade that changes with the payload over a few runs, and never to test by volume. Strix's sandbox has none of the app's LLM keys, so most of these can only be validated against a live target: `--url` plus test credentials in `--instruction`.
 - **Passes of 20:** only critical and high findings are sent (Claude's re-rated severity where there is one), 20 at a time. Each pass is a separate Strix run with its own budget (`--budget`, per pass), its own timeout and a fresh context, so a long list doesn't starve the findings at the end. One command runs every pass, and `validation.json` is updated as each pass finishes. Medium and low findings are validated only when named with `--only`.
-- **Targets:** the repo is cloned by vulnscan itself and passed to Strix as a local directory, so the GitHub token never reaches Strix or its sandbox. `--url` adds a live target (e.g. the staging deployment) — only systems you are authorised to test.
+- **Targets:** the repo is cloned by vulnscan itself and passed to Strix as a local directory, so the GitHub token never reaches Strix or its sandbox. `--url` adds a live target (e.g. the staging deployment) — only systems you are authorised to test. Strix has no login options of its own, so test credentials go in `--instruction`, never in the URL. That covers a password login, a session cookie for an app that signs in with Google, and basic-auth headers ([docs/operations.md](docs/operations.md#logging-in-to-a-live-target)).
 - **Model:** `--model`, or `STRIX_LLM`, defaults to `openrouter/z-ai/glm-5.3`; the OpenRouter key goes in `LLM_API_KEY` (or `OPENROUTER_API_KEY`). Strix only reports a finding it could actually reproduce.
 - **Outputs:** `validation.md`, `validation.json` and `validation.csv` in the same run folder, plus Strix's raw artifacts for each pass (`vulnerabilities.json`, `findings.sarif`, `penetration_test_report.md`, `run.json`) under `raw/strix/pass-<n>/`. Validated findings get `V001…` ids and list the stage-1 ids they confirm.
 - **Re-running** validate on the same scan starts from scratch: every open critical and high finding is sent again, whatever earlier runs did, and the new results replace the old ones, with `V…` ids starting again at `V001`. The fix stage's results for that scan (`fix.md`, `fix.json`, `fix/`) are removed too, because they name findings by the old ids. The PRs stay on GitHub, and the next `fix` run finds and updates them. A failed pass (Strix exit 1, a timeout, unreadable artifacts) doesn't stop the others: the command exits 2 at the end, and that pass's findings show as not sent.
@@ -117,12 +117,12 @@ Detection is only the first stage. `vulnscan validate` re-checks a finished scan
 ```bash
 vulnscan validate your-org/repo                          # latest scan: every critical/high finding, 20 per pass
 vulnscan validate your-org/repo --url https://staging.example.com
-vulnscan validate your-org/repo --scan-mode quick        # faster and shallower than the default, deep
+vulnscan validate your-org/repo --scan-mode quick        # faster and shallower than the default, standard
 vulnscan validate your-org/repo --instruction "login: user/pass" --budget 10   # $10 per pass
 vulnscan validate your-org/repo --only F003              # just one open finding, any severity (repeat --only for more)
 ```
 
-Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https://strix.ai/install | bash`) and `LLM_API_KEY`. A `quick` mode run takes minutes; `deep`, the default, can take hours per pass. On the instance the image contains Strix at a pinned version and the wrapper fetches the key from Parameter Store (`/vulnscan/openrouter-token`, [deploy/README.md](deploy/README.md#add-the-tokens)); see [docs/operations.md](docs/operations.md#run-a-validation-stage-2).
+Validation needs Docker running and, locally, the `strix` CLI (`curl -sSL https://strix.ai/install | bash`) and `LLM_API_KEY`. A `quick` mode run takes minutes; `standard`, the default, 30 minutes to an hour per pass by Strix's estimate; `deep` (`--scan-mode deep`) can take hours per pass. On the instance the image contains Strix at a pinned version and the wrapper fetches the key from Parameter Store (`/vulnscan/openrouter-token`, [deploy/README.md](deploy/README.md#add-the-tokens)); see [docs/operations.md](docs/operations.md#run-a-validation-stage-2).
 
 ## Fixing (stage 3)
 
@@ -139,7 +139,7 @@ Claude is told that a fix which breaks the app is worse than no fix:
 
 The rules it follows:
 - **One finding per branch.** A finding Claude can't fix gets an issue instead of a PR. A later run that does fix it opens a PR, and the issue stays open until someone closes it.
-- **Re-runs start from scratch, without duplicate PRs.** Every validated finding is fixed again. Its branch name stays the same after a re-validation, so if an earlier run pushed it, the new fix is force-pushed over it and its open PR's title and body are updated (`pr updated`). Commits anyone added to that branch are lost. A finding with no open PR gets a new one, and if opening it fails, the branch just pushed is deleted again.
+- **Re-runs start from scratch, without duplicate PRs.** Every validated finding is fixed again. Its branch name stays the same after a re-validation as long as the finding validates the same stage-1 ids ([docs/status.md](docs/status.md#known-issues) has the exceptions). So if an earlier run pushed it, the new fix is force-pushed over it and its open PR's title and body are updated (`pr updated`). Commits anyone added to that branch are lost. A finding with no open PR gets a new one, and if opening it fails on a branch this run created, that branch is deleted again. A branch an earlier run pushed is kept.
 - **Claude sees both stages.** Besides Strix's finding and PoC, the prompt has the stage-1 findings it validates (scanner rule, location, and the triage's reason and fix). If the issue is no longer in the code, Claude changes nothing.
 - **The fixes are untested.** Claude can't run the repo's code or tests, which is why the PRs are drafts.
 - **Public repos are refused** unless you pass `--dry-run`, because a public branch or PR would disclose the vulnerability before the fix is merged. Fix those through a private security advisory instead.
@@ -160,7 +160,7 @@ The GitHub token must be able to push branches and open PRs and issues: a classi
 
 `vulnscan dashboard` serves a read-only web page built from every run folder's `report.json`, `validation.json` and `fix.json`, read again on every request:
 - **All runs:** grouped by repo, newest first. Each shows what was discovered, what's open after triage, what Strix validated, and the fixes.
-- **One run:** the funnel (discovered → open → sent to Strix → validated → PRs opened), the validated `V…` findings with their fix status and PR link, and every open stage-1 finding with the `V…` ids that confirm it, or `not validated` / `not sent`.
+- **One run:** the funnel (discovered → open → sent to Strix → validated → PRs and issues opened), the validated `V…` findings with their fix status and PR or issue link, and every open stage-1 finding with the `V…` ids that confirm it, or `not validated` / `not sent`.
 
 It never shows Strix's PoCs or serves raw files, and it has no write actions. PR status is the link only; open it on GitHub to see whether it's merged.
 

@@ -150,8 +150,8 @@ def main(argv=None):
     v.add_argument("--only", action="append", metavar="ID",
                    help="validate only this open stage-1 finding, of any severity, e.g. F003 or C01 (repeatable). "
                         "Adds to the results already in validation.json")
-    v.add_argument("--scan-mode", choices=["quick", "standard", "deep"], default="deep",
-                   help="Strix scan depth (default: deep, where a pass can take hours)")
+    v.add_argument("--scan-mode", choices=["quick", "standard", "deep"], default="standard",
+                   help="Strix scan depth (default: standard; in deep a pass can take hours)")
     v.add_argument("--budget", type=float,
                    help=f"max LLM spend in USD for each pass of {VALIDATE_PASS} findings "
                         "(default: VULNSCAN_VALIDATE_BUDGET, 25; 0 = no cap)")

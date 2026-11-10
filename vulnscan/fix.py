@@ -169,12 +169,16 @@ def _location(f):
 def _branch_keys(findings):
     """{V id: the end of its branch name}. It's the stage-1 ids the finding validates, which stay the same when
     the scan is validated again, so a later run finds the same branch and PR. A finding Strix found on its own
-    gets a hash of its title and location instead. Findings that would share one get their V id added."""
-    keys = {f["id"]: "-".join(sorted(f.get("validates") or []))
-            or "new-" + hashlib.sha256(f"{f.get('title')}|{_location(f)}".encode()).hexdigest()[:8]
-            for f in findings}
-    shared = Counter(keys.values())
-    return {vid: key if shared[key] == 1 else f"{key}-{vid}" for vid, key in keys.items()}
+    gets a hash of its title and location instead. When findings share a key, the first (in V order) keeps it, so
+    adding a second V id for a finding with `validate --only` doesn't move the first one's branch; the later ones
+    get their V id added."""
+    keys, used = {}, set()
+    for f in findings:
+        key = ("-".join(sorted(f.get("validates") or []))
+               or "new-" + hashlib.sha256(f"{f.get('title')}|{_location(f)}".encode()).hexdigest()[:8])
+        keys[f["id"]] = f"{key}-{f['id']}" if key in used else key
+        used.add(key)
+    return keys
 
 
 def _open_pr(ctx, branch):
@@ -316,7 +320,7 @@ def _fix_one(f, ctx):
                 raise
             result["detail"] += " (issues are turned off in this repo, so no issue was opened)"
             return result
-        result.update(status=status, issue_url=issue.get("html_url"))
+        result.update(status=status, issue_url=issue.get("html_url"), detail=f"{issue.get('html_url')}: {result['detail']}")
         return result
 
     title = (out.get("title") or f"Fix {f['title']}").strip()

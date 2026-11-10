@@ -6,10 +6,11 @@ There's no automated test suite yet. These are the checks used during developmen
 |---|---|
 | Any Python | 1, 2, and 5 without Claude |
 | `triage.py` or `report.py` | 1, 2, 3, and 5 with Claude |
-| `validate.py` or its docs | 1 and 10 (and 11 once Strix is installed) |
-| `fix.py`, or `_run_claude` / `git_env` | 1, 12 and 13 |
+| `validate.py` or its docs | 1, 10 and 20 (and 11 once Strix is installed) |
+| `fix.py`, or `_run_claude` / `git_env` | 1, 12 and 13, plus 20 for `_run_claude` |
 | `dashboard.py` | 1 and 14 |
-| `tools/*.py` (scanner flags or parsing) | 1, 15 and 16 |
+| `purge.py` | 1 and 19 |
+| `tools/*.py` (scanner flags, parsing or `base.py`'s heartbeat) | 1, 15, 16 and 20 |
 | `deep_review.py`, or the Claude budget | 1, 17, and 18 when a prompt changes |
 | `Dockerfile` | 6 |
 | `deploy/host/*` | 7 |
@@ -230,11 +231,11 @@ Check that: every entry in `validation.json` → `passes` is `completed` with `c
 
 ## 12. Fix stage with a stand-in Claude and GitHub (no quota, nothing pushed)
 
-Patch `fix.checkout` to clone a local bare repo (`file://…/origin.git`) instead of GitHub. Patch `fix._github` to act as a small in-memory GitHub: `{"private": True, "default_branch": "main"}` for the repo, a list of PRs for `GET …/pulls?head=…&state=open`, a new PR for POST, and an update for PATCH. Patch `fix._run_claude` to edit a file and return `{"fixed": …, "title", "summary", "review_notes"}`. Seed a run folder with a `validation.json` holding findings that validate `[F001]`, `[F002, C01]` and `[F003]`, one `[new]` finding, a second one validating `[F001]`, one whose call raises `TriageError`, and one with `fixed: false` that still leaves a stray file behind.
+Patch `fix.checkout` to clone a local bare repo (`file://…/origin.git`) instead of GitHub. Patch `fix._github` to act as a small in-memory GitHub: `{"private": True, "default_branch": "main"}` for the repo, a list of PRs for `GET …/pulls?head=…&state=open`, a new PR for POST, and an update for PATCH. Patch `fix._run_claude` to edit a file and return `{"fixed": …, "still_present": …, "title", "summary", "reproduce", "review_notes"}`. A finding that isn't fixed and is still present goes on to the issue calls, so the fake GitHub needs the endpoints in the **Issues** bullet below. Seed a run folder with a `validation.json` holding findings that validate `[F001]`, `[F002, C01]` and `[F003]`, one `[new]` finding, a second one validating `[F001]`, one whose call raises `TriageError`, and one with `fixed: false` and `still_present: false` that still leaves a stray file behind.
 
 What to verify:
-- **Statuses:** `pr opened`, `pr updated`, `not fixed`, `failed`; the exit code is 2 because of the failure, and `fix.md` and `fix.json` are still written.
-- **Branch names:** `…-F001-V001` and `…-F001-V005` (shared key), `…-C01-F002`, `…-new-<8 hex>`.
+- **Statuses:** `pr opened`, `pr updated` (on a second run), `not fixed`, `failed`, and with the **Issues** bullet's setup `issue opened` and then `issue updated`; the exit code is 2 because of the failure, and `fix.md` and `fix.json` are still written.
+- **Branch names:** `…-F001` and `…-F001-V005` (a shared key: the first keeps it), `…-C01-F002`, `…-new-<8 hex>`.
 - **Re-runs:** a second full run calls Claude for every finding again. Each existing branch gets a new commit (force-pushed), and its open PR is PATCHed, not POSTed again, so the PR count only grows by findings that had none. A finding not fixed this time keeps its open PR's link, and its stale `fix/<V id>.patch` is gone. Rewrite `validation.json` with the ids renumbered (as a re-validation does) and delete `fix.json`: the finding validating `[F002, C01]` still updates the same PR.
 - **Git:** only the fixed finding's branch is pushed. Its commit is authored by `vulnscan <vulnscan@noreply.invalid>`, and the "not fixed" finding's stray file is in no commit or patch.
 - **PR:** the POST is a draft against the default branch, titled `[vulnscan] …` (or `[vulnscan][breaking] …`). Its body has the "Before merging" checklist, the stage-1 ids, "Steps to reproduce" and the untested warning. It doesn't have Strix's raw `poc` text.
@@ -284,7 +285,7 @@ curl -s localhost:18080/ ; curl -s localhost:18080/run/<label>/<run>
 ```
 
 What to verify:
-- **Content:** the funnel counts and the F → V → PR joins are right. Titles appear only escaped (no raw `<script>` or `<img`). The `poc` text appears nowhere. The only `href`s are `/` and https PR links.
+- **Content:** the funnel counts and the F → V → PR joins are right. Titles appear only escaped (no raw `<script>` or `<img`). The `poc` text appears nowhere. The only `href`s are `/` and https PR and issue links.
 - **Requests:** `-H 'Host: evil.example'` gets 403. `--path-as-is /run/../../etc/passwd`, `/run/<label>/..%2F..` and `/run/<label>/<run>/validation.json` get 404. POST gets 501. Responses carry the CSP, `nosniff`, `no-referrer` and `no-store` headers.
 - **Bad runs:** an unfinished run shows "unfinished", and a truncated one shows "unreadable". Neither breaks the index.
 

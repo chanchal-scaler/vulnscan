@@ -1,4 +1,4 @@
-"""Opt-in deep review (`vulnscan scan --deep-review`): Claude checks the whole codebase for the issue
+"""The deep review (on by default in `vulnscan scan`; `--no-deep-review` skips it): Claude checks the whole codebase for the issue
 classes scanners can't see, one batch per call, with the batches decided by vulnscan, not Claude.
 
 Claude's general review (triage.py) reads what it chooses in one session, which on a monolith is a

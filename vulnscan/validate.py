@@ -566,7 +566,7 @@ def _run_pass(exe, env, repo, run_dir, n, items, urls, instructions, model, scan
     return findings, strix, error
 
 
-def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="deep",
+def validate(spec, run_dir=None, ref=None, urls=(), model=None, scan_mode="standard",
              budget=None, instructions=(), only=()):
     """Validate a finished scan's open critical and high findings (or only those in `only`) with Strix.
 

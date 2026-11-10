@@ -77,21 +77,38 @@ Every scan includes Claude's whole-codebase SSRF, LLM and access-control review 
 After a finished scan of the repo, `vulnscan validate` re-checks its open critical and high findings with Strix (PoC-driven validation, GLM 5.3 via OpenRouter), 20 per pass, every pass in the one command. It needs `/vulnscan/openrouter-token` to be set ([deploy/README.md](../deploy/README.md#add-the-tokens)) and the image rebuilt since stage 2 was added.
 
 ```bash
-vulnscan validate KingsGambitLab/<repo>                        # the repo's latest scan, deep mode, budget $25 per pass
+vulnscan validate KingsGambitLab/<repo>                        # the repo's latest scan, standard mode, budget $25 per pass
 vulnscan validate KingsGambitLab/<repo> --scan-mode quick --budget 5
 vulnscan validate scaler-hq/<repo> --url https://staging.example.com --instruction "login: user/pass"
 vulnscan validate scaler-hq/<repo> --only F003                 # just one open finding from report.md, any severity (repeat --only for more)
 ```
 
 - Read `validation.md` in the same run folder as the scan (`/var/lib/vulnscan/scans/<org>__<repo>/<timestamp>/`): validated findings with PoCs, the stage-1 ids they confirm, and one line per pass with its status and cost. Strix's own artifacts are under `raw/strix/pass-<n>/`.
-- `quick` mode takes minutes, `deep` can take hours, per pass. Each pass is stopped after `VULNSCAN_VALIDATE_TIMEOUT` (default 2 h) and its LLM spend is capped by `--budget`, so the whole command can take passes × that time and cost up to passes × the budget. The log shows `N finding(s) to validate, in P pass(es)` at the start, and each pass's cost as it finishes.
-- In `deep` mode a pass can run past the 2-hour timeout, which counts as a failed pass. For a big repo, raise it for the run: `VULNSCAN_VALIDATE_TIMEOUT=21600 vulnscan validate …`.
+- `quick` mode takes minutes, `standard` (the default) 30 minutes to an hour by Strix's estimate, and `deep` can take hours, per pass. Each pass is stopped after `VULNSCAN_VALIDATE_TIMEOUT` (default 2 h) and its LLM spend is capped by `--budget`, so the whole command can take passes × that time and cost up to passes × the budget. The log shows `N finding(s) to validate, in P pass(es)` at the start, and each pass's cost as it finishes.
+- With `--scan-mode deep` a pass can run past the 2-hour timeout, which counts as a failed pass. For a big repo, raise it for the run: `VULNSCAN_VALIDATE_TIMEOUT=21600 vulnscan validate …`.
 - If a pass fails, the other passes still run and the command exits 2 at the end. Running the same command again starts over with every critical and high finding.
 - The wrapper gives **validate containers only** the Docker socket (Strix runs its sandbox on the host); a validate run also copies the repo into the run folder, which briefly doubles its disk use there.
 - Stage 1 doesn't need re-running: validate reads the newest `report.json` for that repo and clones the repo itself.
 - A run without `--only` replaces the scan's earlier validation (`V…` ids start at `V001` again) and deletes its `fix.md`, `fix.json` and `fix/`, which name findings by the old ids. Fix PRs stay on GitHub, and the next `vulnscan fix` updates them. An `--only` run adds to the current results instead. Run one validate per scan at a time, because concurrent runs share the run folder's scratch files.
 - The log shows the ids in each pass, then each Strix agent as it starts and finishes and each vulnerability it reports.
 - Sessions still end after 60 minutes; validation is detached like a scan, so reattach with `docker logs -f <id>`.
+
+### Logging in to a live target
+
+Strix 1.7.0 has no login, header or cookie options: credentials reach it only as text, through `--instruction`. Never put them in the URL. Strix treats `https://user:pass@host` as a git repo to clone, and vulnscan writes every `--url` into `validation.md`.
+
+- **Email and password:** `--instruction "Log in at /login as tester@example.com / <password>"`.
+- **Google or another OAuth provider:** Strix can't sign in to Google, which blocks automated browsers and asks for 2FA. Instead, log in to staging yourself as a test user, copy the app's own session cookie or API token, and pass that:
+  ```bash
+  vulnscan validate scaler-hq/<repo> --url https://staging.example.com \
+    --instruction "Authenticated requests need the header 'Cookie: _app_session=<value>' (test user: candidate). An admin session is 'Cookie: _app_session=<value2>'. Don't log out."
+  ```
+  - Give one session per role, so Strix can test access between roles.
+  - A `deep` pass can outlive a short session, so use a long-lived test session.
+  - A staging-only password login, if the app has one, is simpler.
+- **Basic auth in front of the app:** add it to the same instruction: `Every request needs the header 'Authorization: Basic <base64 of user:password>'`. Then give the login or session as above.
+- **Where the credentials end up:** `--instruction` text goes to OpenRouter in Strix's prompt. It's saved in the run folder's `strix-instructions.md` and can appear in Strix's PoCs. On the instance, root can see it on the container's command line (`docker inspect`). So use dedicated staging test accounts, and end those sessions afterwards.
+- **LLM findings** need this most: Strix's sandbox has none of the app's LLM keys, so they can usually be proven only against a live target.
 
 ## Fix validated findings (stage 3)
 
@@ -107,7 +124,7 @@ vulnscan fix scaler-hq/<repo> --run /var/lib/vulnscan/scans/scaler-hq__<repo>/<t
 - Read `fix.md` in the run folder. It lists each finding's status and its PR or issue link, or why there's neither.
 - Issues aren't closed by vulnscan: when a later run fixes the finding and opens a PR, close the issue once that's merged. List them with `gh issue list --repo scaler-hq/<repo> --search "[vulnscan] in:title"`.
 - Every PR is a draft and **untested**. Claude can't run the repo's code or tests, so whoever owns the code reviews and tests it before merging.
-- A re-run fixes every finding again, even after a re-validation. A finding whose branch exists gets the new fix force-pushed onto it, and its open PR is updated (`pr updated`), so there are no duplicates. **Commits anyone pushed to a `vulnscan/fix-*` branch are lost on the next run;** to keep a fix someone changed, move it to a branch of their own. PRs opened before 2026-11-11 have branches named after `V…` ids, which a re-run doesn't match, so close those by hand.
+- A re-run fixes every finding again, and still finds each one's branch after a re-validation as long as it validates the same stage-1 ids. A finding whose branch exists gets the new fix force-pushed onto it, and its open PR is updated (`pr updated`), so there are no duplicates. **Commits anyone pushed to a `vulnscan/fix-*` branch are lost on the next run;** to keep a fix someone changed, move it to a branch of their own. PRs opened before 2026-11-11 have branches named after `V…` ids, which a re-run doesn't match, so close those by hand.
 - `fix.md` and `fix.json` describe the latest fix run; an `--only` run keeps the other findings' rows. The PRs themselves are on GitHub: `gh pr list --repo scaler-hq/<repo> --search "[vulnscan] in:title"`.
 - Public repos are refused. It needs no image rebuild beyond `vulnscan-build` and no new token: it uses the same GitHub PAT, which has the `repo` and `workflow` scopes.
 
@@ -127,7 +144,7 @@ vulnscan purge scan KingsGambitLab/<repo> --all --yes    # every run of the repo
 
 ## View the dashboard
 
-The dashboard is a read-only page that tracks every run: discovered, validated by Strix, and fix PRs opened. `vulnscan-build` runs it as the container `vulnscan-dashboard`. The container has no tokens, mounts the scans read-only, and is published only on the instance's `127.0.0.1:8080`, so there's no inbound rule and no public address. To open it, forward the port from your machine:
+The dashboard is a read-only page that tracks every run: discovered, validated by Strix, and the fix PRs and issues opened. `vulnscan-build` runs it as the container `vulnscan-dashboard`. The container has no tokens, mounts the scans read-only, and is published only on the instance's `127.0.0.1:8080`, so there's no inbound rule and no public address. To open it, forward the port from your machine:
 
 ```bash
 aws ssm start-session --target $I --document-name AWS-StartPortForwardingSession \
@@ -273,7 +290,7 @@ If AWS reclaims the capacity, the instance **stops**: the disks, the image and t
 | `fix`: `<repo> is public` | PRs would disclose the vulnerability | Expected. Use `--dry-run` and fix it through a private security advisory |
 | `fix`: `git push failed … 403` or `GitHub API POST …/pulls: HTTP 403/404` | The token can't push to or open PRs on that repo (read-only fine-grained token, missing SSO authorisation, or a push ruleset) | Check the token's scopes and SSO; for a ruleset (e.g. one restricting commit emails), ask the repo admins |
 | `fix`: `git push failed … refusing to allow a Personal Access Token to create or update workflow … without workflow scope` | The fix changes a file under `.github/workflows/`, and the token has no `workflow` scope (e.g. a rotated token created with `repo` only) | Add the `workflow` scope on the token's page (a classic PAT keeps its value, so Parameter Store needs no change), then re-run with `--only <V id>`. The commit is also in `<run>/fix/<V id>.patch` |
-| `fix`: `HTTP 422 … Draft pull requests are not supported` | Draft PRs need a paid plan on private repos | Not handled; the branch is pushed, so open the PR from it by hand |
+| `fix`: `HTTP 422 … Draft pull requests are not supported` | Draft PRs need a paid plan on private repos | Not handled. A branch this run created is deleted again; one an earlier run pushed is kept, with the new fix. Open the PR by hand from that branch, or from `<run>/fix/<V id>.patch` |
 | `fix`: `… the fix is pushed to <branch>, but its PR wasn't opened or updated` | The GitHub API refused the PR update for a branch an earlier run pushed | The branch has the new fix; the PR's title and body are still the old ones. Re-run with `--only <V id>`. |
 | Dashboard port forwarding: `Connection to destination port failed` | The `vulnscan-dashboard` container isn't running, e.g. the image predates the dashboard | On the instance: `docker ps -a --filter name=vulnscan-dashboard` and `docker logs vulnscan-dashboard`. `vulnscan-build` recreates it. |
 | Dashboard says `Forbidden: Open this page through localhost` | The browser reached it under another host name | Open `http://localhost:<port>` |
